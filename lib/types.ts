@@ -1,3 +1,5 @@
+export type Currency = '€' | '$'
+
 export type Subscription = {
   id?: string
   user_id?: string
@@ -88,6 +90,9 @@ export const CATS: Record<string, { icon: string; items: { name: string; price: 
   'Overig': { icon: '📌', items: [] },
 }
 
+// EUR/USD exchange rate (approximate)
+export const USD_RATE = 1.08
+
 export function toMonthly(price: number | string, cycle: string): number {
   const p = parseFloat(String(price)) || 0
   if (cycle === 'jaar') return p / 12
@@ -113,6 +118,28 @@ export function effectiveMonthly(s: Subscription): number {
   return toMonthly(price, s.cycle)
 }
 
-export function fmt(n: number): string {
+export function fmt(n: number, currency: Currency = '€'): string {
+  if (currency === '$') {
+    return '$\u00a0' + (n * USD_RATE).toFixed(2).replace('.', ',')
+  }
   return '€\u00a0' + n.toFixed(2).replace('.', ',')
+}
+
+/**
+ * Als de verlengingsdatum in het verleden ligt, schuif hem automatisch door
+ * naar de eerstvolgende toekomstige datum op basis van de cyclus.
+ */
+export function nextRenewDate(dateStr: string, cycle: 'maand' | 'kwartaal' | 'jaar'): string {
+  if (!dateStr) return dateStr
+  const today = new Date(); today.setHours(0, 0, 0, 0)
+  const d = new Date(dateStr); d.setHours(0, 0, 0, 0)
+  if (d >= today) return dateStr
+
+  // Schuif door totdat de datum in de toekomst ligt
+  while (d < today) {
+    if (cycle === 'maand') d.setMonth(d.getMonth() + 1)
+    else if (cycle === 'kwartaal') d.setMonth(d.getMonth() + 3)
+    else d.setFullYear(d.getFullYear() + 1)
+  }
+  return d.toISOString().slice(0, 10)
 }
