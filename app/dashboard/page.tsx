@@ -64,7 +64,7 @@ export default function Dashboard() {
       if (!s.renew_date) return s
       const advanced = nextRenewDate(s.renew_date, s.cycle)
       if (advanced !== s.renew_date) {
-        updates.push(supabase.from('items').update({ renew_date: advanced }).eq('id', s.id).then(() => {}))
+        updates.push(Promise.resolve(supabase.from('items').update({ renew_date: advanced }).eq('id', s.id)).then(() => {}))
         return { ...s, renew_date: advanced }
       }
       return s
