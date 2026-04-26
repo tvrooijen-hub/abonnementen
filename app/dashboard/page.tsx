@@ -50,7 +50,7 @@ export default function Dashboard() {
   }
 
   async function loadSubs(uid: string, fid: string | null) {
-    let query = supabase.from('items').select('*').order('created_at', { ascending: true })
+    let query = supabase.from('subscriptions').select('*').order('created_at', { ascending: true })
     if (fid) {
       query = query.eq('family_id', fid)
     } else {
@@ -64,7 +64,7 @@ export default function Dashboard() {
       if (!s.renew_date) return s
       const advanced = nextRenewDate(s.renew_date, s.cycle)
       if (advanced !== s.renew_date) {
-        updates.push(Promise.resolve(supabase.from('items').update({ renew_date: advanced }).eq('id', s.id)).then(() => {}))
+        updates.push(Promise.resolve(supabase.from('subscriptions').update({ renew_date: advanced }).eq('id', s.id)).then(() => {}))
         return { ...s, renew_date: advanced }
       }
       return s
@@ -79,7 +79,7 @@ export default function Dashboard() {
   async function createFamily() {
     setFamilyStatus('saving')
     const newId = crypto.randomUUID()
-    await supabase.from('items').update({ family_id: newId }).eq('user_id', userId)
+    await supabase.from('subscriptions').update({ family_id: newId }).eq('user_id', userId)
     await supabase.from('profiles').update({ family_id: newId }).eq('id', userId)
     setFamilyId(newId)
     setFamilyStatus('success')
@@ -97,7 +97,7 @@ export default function Dashboard() {
       return
     }
     setFamilyStatus('saving')
-    await supabase.from('items').update({ family_id: input }).eq('user_id', userId)
+    await supabase.from('subscriptions').update({ family_id: input }).eq('user_id', userId)
     await supabase.from('profiles').update({ family_id: input }).eq('id', userId)
     setFamilyId(input)
     setFamilyStatus('success')
@@ -107,7 +107,7 @@ export default function Dashboard() {
 
   async function leaveFamily() {
     if (!confirm('Weet je zeker dat je de gezinsgroep wilt verlaten? Je eigen abonnementen blijven bewaard.')) return
-    await supabase.from('items').update({ family_id: null }).eq('user_id', userId)
+    await supabase.from('subscriptions').update({ family_id: null }).eq('user_id', userId)
     await supabase.from('profiles').update({ family_id: null }).eq('id', userId)
     setFamilyId(null)
     setFamilyStatus('idle')
@@ -127,14 +127,14 @@ export default function Dashboard() {
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) return
     if (sub.id) {
-      await supabase.from('items').update({
+      await supabase.from('subscriptions').update({
         name: sub.name, price: sub.price || null, cycle: sub.cycle,
         renew_date: sub.renew_date || null, cat: sub.cat,
         promo_price: sub.promo_price || null, promo_until: sub.promo_until || null,
         payment_method: sub.payment_method,
       }).eq('id', sub.id)
     } else {
-      const { data } = await supabase.from('items').insert({
+      const { data } = await supabase.from('subscriptions').insert({
         user_id: session.user.id, family_id: familyId || null,
         name: sub.name, price: sub.price || null, cycle: sub.cycle,
         renew_date: sub.renew_date || null, cat: sub.cat,
@@ -147,7 +147,7 @@ export default function Dashboard() {
   }
 
   async function deleteSub(sub: Subscription) {
-    if (sub.id) await supabase.from('items').delete().eq('id', sub.id)
+    if (sub.id) await supabase.from('subscriptions').delete().eq('id', sub.id)
     setSubs(prev => prev.filter(s => s !== sub))
   }
 
@@ -159,7 +159,7 @@ export default function Dashboard() {
     }
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) return
-    const { data } = await supabase.from('items').insert({
+    const { data } = await supabase.from('subscriptions').insert({
       user_id: session.user.id, family_id: familyId || null,
       name: item.name, price: item.price, cycle: item.cycle,
       renew_date: null, cat, promo_price: null, promo_until: null, payment_method: '',
@@ -170,7 +170,7 @@ export default function Dashboard() {
   async function addBlank() {
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) return
-    const { data } = await supabase.from('items').insert({
+    const { data } = await supabase.from('subscriptions').insert({
       user_id: session.user.id, family_id: familyId || null,
       name: '', price: null, cycle: 'maand', renew_date: null, cat: 'Overig',
       promo_price: null, promo_until: null, payment_method: '',
