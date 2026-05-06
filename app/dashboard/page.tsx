@@ -4,15 +4,20 @@ import { useRouter } from 'next/navigation'
 import { createBrowserClient } from '@supabase/ssr'
 import { CATS, PAYMENT_METHODS, fmt, daysUntil, logoUrl, defaultKenmerken, effectiveMonthlyEUR } from '@/lib/types'
 
-const supabase = createBrowserClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
-
 const CAT_NAMES = Object.keys(CATS)
+
+function getSupabase() {
+  return createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+}
+
+function nullDate(d: string) { return d || null }
 
 export default function Dashboard() {
   const router = useRouter()
+  const supabase = getSupabase()
   const [subs, setSubs] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [panel, setPanel] = useState('beheer')
@@ -27,6 +32,7 @@ export default function Dashboard() {
   const [overstapData, setOverstapData] = useState({ opzegDatum: '', nieuweNaam: '', nieuwePrijs: '', nieuweCyclus: 'maand' })
 
   useEffect(() => {
+    const supabase = getSupabase()
     supabase.auth.getSession().then(({ data }) => {
       if (!data.session) router.replace('/login')
       else fetchSubs()
@@ -34,6 +40,7 @@ export default function Dashboard() {
   }, [])
 
   async function fetchSubs() {
+    const supabase = getSupabase()
     const { data } = await supabase
       .from('subscriptions')
       .select('*, kenmerken(id, key, value, sort_order), price_history(id, price, valid_from, note)')
@@ -43,7 +50,11 @@ export default function Dashboard() {
   }
 
   async function updateField(sub: any, fields: any) {
+    const supabase = getSupabase()
     const { kenmerken, price_history, ...rest } = fields
+    // Convert empty strings to null for date fields
+    if (rest.renew_date === '') rest.renew_date = null
+    if (rest.valid_from === '') rest.valid_from = null
     if (Object.keys(rest).length) await supabase.from('subscriptions').update(rest).eq('id', sub.id)
     if (kenmerken !== undefined) {
       await supabase.from('kenmerken').delete().eq('subscription_id', sub.id)
@@ -53,16 +64,20 @@ export default function Dashboard() {
     }
     if (price_history !== undefined) {
       await supabase.from('price_history').delete().eq('subscription_id', sub.id)
-      if (price_history.length) await supabase.from('price_history').insert(
-        price_history.map((ph: any) => ({ subscription_id: sub.id, user_id: sub.user_id, price: ph.price, valid_from: ph.valid_from, note: ph.note || null }))
+      const valid = price_history.filter((ph: any) => ph.valid_from && ph.price)
+      if (valid.length) await supabase.from('price_history').insert(
+        valid.map((ph: any) => ({ subscription_id: sub.id, user_id: sub.user_id, price: ph.price, valid_from: ph.valid_from, note: ph.note || null }))
       )
     }
     fetchSubs()
   }
 
   async function addSub(data: any) {
+    const supabase = getSupabase()
     const { data: { user } } = await supabase.auth.getUser()
     const { kenmerken, ...rest } = data
+    // Convert empty strings to null for date fields
+    if (rest.renew_date === '') rest.renew_date = null
     const { data: sub } = await supabase.from('subscriptions').insert({ ...rest, user_id: user!.id }).select().single()
     if (sub && kenmerken?.length) await supabase.from('kenmerken').insert(
       kenmerken.map((k: any, i: number) => ({ subscription_id: sub.id, user_id: user!.id, key: k.key, value: k.value || '', sort_order: i }))
@@ -72,25 +87,39 @@ export default function Dashboard() {
   }
 
   async function deleteSub(id: string) {
+    const supabase = getSupabase()
     await supabase.from('subscriptions').delete().eq('id', id)
     fetchSubs()
   }
 
   async function confirmOverstap() {
     if (!overstapSub) return
+    const supabase = getSupabase()
     const { data: { user } } = await supabase.auth.getUser()
     const { data: newSub } = await supabase.from('subscriptions').insert({
-      name: overstapData.nieuweNaam, price: parseFloat(overstapData.nieuwePrijs) || 0,
-      price_currency: overstapSub.price_currency, cycle: overstapData.nieuweCyclus,
-      renew_date: '', cat: overstapSub.cat, payment_method: overstapSub.payment_method,
-      domain: '', status: 'actief', predecessor_id: overstapSub.id, user_id: user!.id
+      name: overstapData.nieuweNaam,
+      price: parseFloat(overstapData.nieuwePrijs) || 0,
+      price_currency: overstapSub.price_currency,
+      cycle: overstapData.nieuweCyclus,
+      renew_date: null,
+      cat: overstapSub.cat,
+      payment_method: overstapSub.payment_method,
+      domain: '',
+      status: 'actief',
+      predecessor_id: overstapSub.id,
+      user_id: user!.id
     }).select().single()
-    await supabase.from('subscriptions').update({ status: 'opgezegd', successor_id: newSub?.id, renew_date: overstapData.opzegDatum || overstapSub.renew_date }).eq('id', overstapSub.id)
+    await supabase.from('subscriptions').update({
+      status: 'opgezegd',
+      successor_id: newSub?.id,
+      renew_date: nullDate(overstapData.opzegDatum) || overstapSub.renew_date || null
+    }).eq('id', overstapSub.id)
     setOverstapOpen(false)
     fetchSubs()
   }
 
   async function handleLogout() {
+    const supabase = getSupabase()
     await supabase.auth.signOut()
     router.replace('/login')
   }
@@ -107,7 +136,7 @@ export default function Dashboard() {
     return t + effectiveMonthlyEUR(s)
   }, 0)
 
-  if (loading) return <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100vh', color:'#8A8A8F' }}>Laden…</div>
+  if (loading) return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: '#8A8A8F' }}>Laden…</div>
 
   return (
     <div className="app-container">
@@ -121,7 +150,6 @@ export default function Dashboard() {
       </nav>
 
       <div className="panel">
-        {/* ── BEHEER ── */}
         {panel === 'beheer' && <>
           <div className="totals">
             <div className="total-card"><div className="lbl">Per maand</div><div className="val">{fmt(totalMonthly)}</div></div>
@@ -138,7 +166,7 @@ export default function Dashboard() {
               {CATS[activeCat].items.map(item => {
                 const exists = subs.some(s => s.name?.toLowerCase() === item.name.toLowerCase())
                 return <button key={item.name} className={`suggestion-chip${exists?' active':''}`}
-                  onClick={() => !exists && addSub({ name: item.name, price: item.price, price_currency:'€', cycle: item.cycle, renew_date:'', cat: activeCat, domain: item.domain, payment_method:'', status:'actief', kenmerken: defaultKenmerken(activeCat) })}>
+                  onClick={() => !exists && addSub({ name: item.name, price: item.price, price_currency:'€', cycle: item.cycle, renew_date: null, cat: activeCat, domain: item.domain, payment_method:'', status:'actief', kenmerken: defaultKenmerken(activeCat) })}>
                   {item.name}
                 </button>
               })}
@@ -189,7 +217,7 @@ export default function Dashboard() {
                         </div>
                         <div className="field-group">
                           <div className="field-label">Verlengdatum</div>
-                          <input className="field-input" type="date" defaultValue={s.renew_date} onBlur={e=>updateField(s,{renew_date:e.target.value})} />
+                          <input className="field-input" type="date" defaultValue={s.renew_date||''} onBlur={e=>updateField(s,{renew_date:e.target.value||null})} />
                         </div>
                         <div className="field-group">
                           <div className="field-label">Betaling</div>
@@ -208,7 +236,7 @@ export default function Dashboard() {
                           <div className="field-label">Status</div>
                           <div className="status-trio">
                             <button className={`status-btn${s.status==='actief'?' active green':''}`} onClick={()=>updateField(s,{status:'actief'})}>✓ Actief</button>
-                            <button className={`status-btn`} onClick={()=>{setOverstapSub(s);setOverstapStep(1);setOverstapData({opzegDatum:'',nieuweNaam:'',nieuwePrijs:String(s.price),nieuweCyclus:s.cycle});setOverstapOpen(true)}}>🔄 Overstappen</button>
+                            <button className="status-btn" onClick={()=>{setOverstapSub(s);setOverstapStep(1);setOverstapData({opzegDatum:'',nieuweNaam:'',nieuwePrijs:String(s.price),nieuweCyclus:s.cycle});setOverstapOpen(true)}}>🔄 Overstappen</button>
                             <button className={`status-btn${s.status==='opgezegd'?' active red':''}`} onClick={()=>updateField(s,{status:'opgezegd'})}>✕ Opgezegd</button>
                           </div>
                           {s.predecessor_id && <div style={{fontSize:11,color:'#7C3AED',marginTop:5}}>↩ Opvolger van {subs.find(x=>x.id===s.predecessor_id)?.name}</div>}
@@ -216,11 +244,10 @@ export default function Dashboard() {
                         </div>
                       </div>
 
-                      {/* Kenmerken */}
                       <div className="accordion-section">
                         <button className="accordion-trigger" onClick={()=>{
                           if(!openAccordions.has(`k-${s.id}`)&&!(s.kenmerken||[]).some((k:any)=>k.value)){
-                            const d=defaultKenmerken(s.cat);
+                            const d=defaultKenmerken(s.cat)
                             if(d.length) updateField(s,{kenmerken:[...(s.kenmerken||[]),...d.filter((dk:any)=>!(s.kenmerken||[]).some((k:any)=>k.key.toLowerCase()===dk.key.toLowerCase()))]})
                           }
                           toggleAccordion(`k-${s.id}`)
@@ -243,7 +270,6 @@ export default function Dashboard() {
                         </div>}
                       </div>
 
-                      {/* Prijswijzigingen */}
                       <div className="accordion-section">
                         <button className="accordion-trigger" onClick={()=>toggleAccordion(`p-${s.id}`)}>
                           <span className="accordion-trigger-left">📈 Prijswijzigingen</span>
@@ -274,7 +300,6 @@ export default function Dashboard() {
           <button className="add-btn" onClick={()=>{setAddForm({name:'',price:'',cycle:'maand',renew_date:'',payment_method:'',cat:'',domain:''});setAddOpen(true)}}>+ Abonnement toevoegen</button>
         </>}
 
-        {/* ── OVERZICHT ── */}
         {panel === 'overzicht' && <>
           <div className="totals">
             <div className="total-card"><div className="lbl">Per maand</div><div className="val">{fmt(totalMonthly)}</div></div>
@@ -284,14 +309,19 @@ export default function Dashboard() {
           {CAT_NAMES.filter(c=>subs.some(s=>s.cat===c&&s.status==='actief')).map(c=>{
             const cs=subs.filter(s=>s.cat===c&&s.status==='actief')
             const ct=cs.reduce((t,s)=>t+effectiveMonthlyEUR(s),0)
-            return <div key={c} style={{display:'flex',justifyContent:'space-between',padding:'10px 14px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',marginBottom:6,fontSize:13}}>
-              <span>{CATS[c].icon} {c} <span style={{color:'var(--muted)'}}>({cs.length})</span></span>
-              <span style={{fontFamily:'monospace',fontWeight:500}}>{fmt(ct)}/mnd</span>
+            const pct=totalMonthly>0?Math.round(ct/totalMonthly*100):0
+            return <div key={c} style={{marginBottom:8}}>
+              <div style={{display:'flex',justifyContent:'space-between',padding:'10px 14px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',fontSize:13,marginBottom:3}}>
+                <span>{CATS[c].icon} {c} <span style={{color:'var(--muted)'}}>({cs.length})</span></span>
+                <span style={{fontFamily:'monospace',fontWeight:500}}>{fmt(ct)}/mnd</span>
+              </div>
+              <div style={{height:4,background:'var(--border)',borderRadius:2}}>
+                <div style={{height:4,background:'var(--blue)',borderRadius:2,width:`${pct}%`,transition:'width .3s'}}/>
+              </div>
             </div>
           })}
         </>}
 
-        {/* ── INZICHTEN ── */}
         {panel === 'inzichten' && <>
           {activeSubs.filter(s=>s.cat==='Streaming').length>=3 && (
             <div style={{padding:'14px 16px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',marginBottom:8,display:'flex',gap:12}}>
@@ -310,14 +340,14 @@ export default function Dashboard() {
           {savedMonthly>0.01 && (
             <div style={{padding:'14px 16px',background:'var(--green-bg)',border:'1px solid #b5d97a',borderRadius:'var(--radius-sm)',marginBottom:8,display:'flex',gap:12}}>
               <div style={{fontSize:18}}>✓</div>
-              <div><div style={{fontWeight:500,fontSize:13,marginBottom:4}}>Bespaard: {fmt(savedMonthly)}/mnd</div>
+              <div><div style={{fontWeight:500,fontSize:13,marginBottom:4}}>Bespaard: {fmt(savedMonthly)}/mnd · {fmt(savedMonthly*12)}/jaar</div>
               <div style={{fontSize:12,color:'var(--green)'}}>Door opzeggen of overstappen.</div></div>
             </div>
           )}
+          {activeSubs.length===0 && <div style={{fontSize:13,color:'var(--muted)',padding:'20px 0'}}>Voeg abonnementen toe voor inzichten.</div>}
         </>}
       </div>
 
-      {/* ── ADD MODAL ── */}
       {addOpen && (
         <div className="add-modal-overlay" onClick={e=>e.target===e.currentTarget&&setAddOpen(false)}>
           <div className="add-modal">
@@ -342,17 +372,39 @@ export default function Dashboard() {
                     {CAT_NAMES.map(c=><option key={c} value={c}>{CATS[c].icon} {c}</option>)}
                   </select>
                 </div>
+                {addForm.cat && defaultKenmerken(addForm.cat).length > 0 && (
+                  <div className="add-manual-field">
+                    <label className="add-manual-label">Kenmerken</label>
+                    {defaultKenmerken(addForm.cat).map((kv:any, ki:number) => (
+                      <div key={ki} style={{display:'flex',gap:6,marginBottom:4}}>
+                        <input className="add-manual-input" style={{width:'38%'}} value={kv.key} readOnly />
+                        <input className="add-manual-input" style={{flex:1}} placeholder="Waarde"
+                          onChange={e=>{
+                            const k=[...defaultKenmerken(addForm.cat)]
+                            k[ki]={...k[ki],value:e.target.value}
+                            setAddForm((f:any)=>({...f,_kenmerken:k}))
+                          }} />
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
             <div className="add-modal-footer">
               <button className="add-secondary-btn" onClick={()=>setAddOpen(false)}>Annuleren</button>
-              <button className="add-primary-btn" onClick={()=>addSub({...addForm,price:parseFloat(addForm.price)||0,price_currency:'€',status:'actief',kenmerken:defaultKenmerken(addForm.cat)})}>Toevoegen</button>
+              <button className="add-primary-btn" onClick={()=>addSub({
+                ...addForm,
+                price: parseFloat(addForm.price)||0,
+                price_currency: '€',
+                renew_date: addForm.renew_date||null,
+                status: 'actief',
+                kenmerken: addForm._kenmerken || defaultKenmerken(addForm.cat)
+              })}>Toevoegen</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ── OVERSTAP MODAL ── */}
       {overstapOpen && overstapSub && (
         <div className="add-modal-overlay" onClick={e=>e.target===e.currentTarget&&setOverstapOpen(false)}>
           <div className="add-modal">
@@ -366,7 +418,7 @@ export default function Dashboard() {
               </div>
               {overstapStep===1 && <div className="add-manual-form">
                 <div style={{fontSize:13,color:'var(--muted)',marginBottom:8}}>Huidig: {overstapSub.name} · {fmt(effectiveMonthlyEUR(overstapSub))}/mnd</div>
-                <div className="add-manual-field"><label className="add-manual-label">Opzegdatum</label><input className="add-manual-input" type="date" value={overstapData.opzegDatum} onChange={e=>setOverstapData(d=>({...d,opzegDatum:e.target.value}))} /></div>
+                <div className="add-manual-field"><label className="add-manual-label">Opzegdatum (optioneel)</label><input className="add-manual-input" type="date" value={overstapData.opzegDatum} onChange={e=>setOverstapData(d=>({...d,opzegDatum:e.target.value}))} /></div>
               </div>}
               {overstapStep===2 && <div className="add-manual-form">
                 <div className="add-manual-field"><label className="add-manual-label">Naam nieuwe aanbieder</label><input className="add-manual-input" value={overstapData.nieuweNaam} onChange={e=>setOverstapData(d=>({...d,nieuweNaam:e.target.value}))} placeholder="bijv. Youfone" /></div>
