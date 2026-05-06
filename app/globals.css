@@ -150,9 +150,10 @@ input, select { font-family: inherit; }
 .overstap-netto.cost { background: var(--amber-bg); border-color: #F5D89A; color: var(--amber); }
 
 .prog-event { display: flex; align-items: flex-start; gap: 10px; padding: 10px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 6px; font-size: 13px; }
-.prog-event-icon { width: 28px; height: 28px; border-radius: var(--radius-xs); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; flex-shrink: 0; }
+.prog-event-icon { width: 28px; height: 28px; border-radius: var(--radius-xs); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; flex-shrink: 0; background: var(--bg); color: var(--muted); }
 .prog-event.up .prog-event-icon { background: var(--red-bg); color: var(--red); }
 .prog-event.down .prog-event-icon { background: var(--green-bg); color: var(--green); }
+.prog-event.neutral .prog-event-icon { background: var(--blue-bg); color: var(--blue); }
 .prog-event-date { font-size: 11px; color: var(--subtle); margin-top: 2px; }
 .prog-event-delta { font-family: 'DM Mono', monospace; font-size: 12px; font-weight: 600; margin-left: auto; white-space: nowrap; }
 .prog-event.up .prog-event-delta { color: var(--red); }
@@ -174,4 +175,15 @@ input, select { font-family: inherit; }
   .totals { grid-template-columns: 1fr 1fr; }
   .sub-fields { grid-template-columns: 1fr; }
   .tab { font-size: 11px; padding: 10px 6px; }
+}
+/* ── Prognose chart card ── */
+.prog-chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); margin-bottom: 20px; }
+
+/* ── Export btn ── */
+.export-btn { font-size: 12.5px; padding: 7px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--muted); transition: all .12s; display: inline-flex; align-items: center; gap: 6px; }
+.export-btn:hover { border-color: var(--border-hover); color: var(--text); }
+
+/* ── Overzicht responsive ── */
+@media (max-width: 560px) {
+  .chart-grid-2 { grid-template-columns: 1fr !important; }
 }
