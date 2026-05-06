@@ -1,854 +1,1129 @@
 'use client'
-import { useEffect, useState, useRef } from 'react'
-import { Chart, ArcElement, DoughnutController, Tooltip, Legend } from 'chart.js'
+import { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
-import { createClient } from '@/lib/supabase'
+import { createBrowserClient } from '@supabase/ssr'
 import {
-  Subscription, SubStatus, CATS, PAYMENT_METHODS,
-  toMonthly, daysUntil, introActive, effectiveMonthlyEUR,
-  fmt, nextRenewDate, logoUrl, USD_RATE
+  Subscription, Kenmerk, PriceHistory,
+  CATS, CAT_KENMERKEN, PAYMENT_METHODS, fmt,
+  effectiveMonthlyEUR, effectiveMonthlyEURForDate,
+  daysUntil, logoUrl, defaultKenmerken, toMonthly
 } from '@/lib/types'
 
-Chart.register(ArcElement, DoughnutController, Tooltip, Legend)
-
+// ── Helpers ──────────────────────────────────────────────────
 const CAT_NAMES = Object.keys(CATS)
-const COLORS = ['#378ADD','#1D9E75','#D85A30','#D4537E','#BA7517','#639922','#7F77DD','#5DCAA5','#E8A838','#9B6DCC','#4AABDB','#D46B3F']
+const USD_RATE = 1.08
 
-type Panel = 'beheer' | 'overzicht' | 'inzichten' | 'delen'
-
-function normalize(s: Subscription): Subscription {
-  return {
-    ...s,
-    price_currency: s.price_currency || '€',
-    domain: s.domain || '',
-    intro_price: s.intro_price || null,
-    intro_until: s.intro_until || null,
-    status: s.status || 'actief',
-  }
+function toMonthlyEUR(s: Subscription): number {
+  return effectiveMonthlyEUR(s)
 }
 
+// ── Types for UI state ────────────────────────────────────────
+type Panel = 'beheer' | 'overzicht' | 'prognose' | 'inzichten' | 'delen'
+type AddStep = 'upload' | 'manual' | 'review'
+
+interface ExtractedContract {
+  naam?: string
+  prijs?: number
+  cyclus?: string
+  verlengdatum?: string
+  samenvatting?: string
+  kenmerken?: { key: string; value: string }[]
+}
+
+// ── Main Component ────────────────────────────────────────────
 export default function Dashboard() {
   const router = useRouter()
-  const [userId, setUserId] = useState('')
-  const [userEmail, setUserEmail] = useState('')
+  const supabase = createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+
   const [subs, setSubs] = useState<Subscription[]>([])
   const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
   const [panel, setPanel] = useState<Panel>('beheer')
   const [activeCat, setActiveCat] = useState(CAT_NAMES[0])
-  const [notifDismissed, setNotifDismissed] = useState(false)
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
-  const [analyseCat, setAnalyseCat] = useState<string | null>(null)
+  const [openAccordions, setOpenAccordions] = useState<Set<string>>(new Set())
 
-  // Family sharing
-  const [familyId, setFamilyId] = useState<string | null>(null)
-  const [familyInput, setFamilyInput] = useState('')
-  const [familyStatus, setFamilyStatus] = useState<'idle'|'saving'|'success'|'error'>('idle')
-  const [familyMsg, setFamilyMsg] = useState('')
-  const [copyLabel, setCopyLabel] = useState('Kopieer')
+  // Add modal state
+  const [addOpen, setAddOpen] = useState(false)
+  const [addStep, setAddStep] = useState<AddStep>('upload')
+  const [addPrefill, setAddPrefill] = useState<Partial<Subscription> | null>(null)
+  const [addExtracted, setAddExtracted] = useState<ExtractedContract | null>(null)
+  const [addLoading, setAddLoading] = useState(false)
+  const [addError, setAddError] = useState('')
 
-  const supabase = createClient()
-  const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  // Overstap modal
+  const [overstapOpen, setOverstapOpen] = useState(false)
+  const [overstapSub, setOverstapSub] = useState<Subscription | null>(null)
+  const [overstapStep, setOverstapStep] = useState(1)
+  const [overstapData, setOverstapData] = useState({ opzegDatum: '', nieuweNaam: '', nieuwePrijs: '', nieuweCyclus: 'maand', })
 
+  // AI upload for existing sub
+  const [aiUploadSub, setAiUploadSub] = useState<Subscription | null>(null)
+  const [aiLoading, setAiLoading] = useState(false)
+
+  // ── Auth ────────────────────────────────────────────────────
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!session) { router.replace('/login'); return }
-      setUserId(session.user.id)
-      setUserEmail(session.user.email || '')
-      loadProfile(session.user.id)
-    })
+    const checkAuth = async () => {
+      const { data } = await supabase.auth.getSession()
+      if (!data.session) router.replace('/login')
+    }
+    checkAuth()
   }, [])
 
-  async function loadProfile(uid: string) {
-    await supabase.from('profiles').upsert({ id: uid }, { onConflict: 'id' })
-    const { data: profile } = await supabase.from('profiles').select('family_id').eq('id', uid).single()
-    const fid = profile?.family_id || null
-    setFamilyId(fid)
-    loadSubs(uid, fid)
-  }
-
-  async function loadSubs(uid: string, fid: string | null) {
-    let query = supabase.from('subscriptions').select('*').order('created_at', { ascending: true })
-    if (fid) query = query.eq('family_id', fid)
-    else query = query.eq('user_id', uid)
-
-    const { data } = await query
-    const raw = (data || []).map(normalize)
-
-    // Auto-advance actieve verlopen datums
-    const updates: Promise<void>[] = []
-    const fixed = raw.map(s => {
-      if (s.status === 'opgezegd' || !s.renew_date) return s
-      const advanced = nextRenewDate(s.renew_date, s.cycle)
-      if (advanced !== s.renew_date) {
-        updates.push(Promise.resolve(
-          supabase.from('subscriptions').update({ renew_date: advanced }).eq('id', s.id)
-        ).then(() => {}))
-        return { ...s, renew_date: advanced }
-      }
-      return s
-    })
-    await Promise.all(updates)
-    setSubs(fixed)
+  // ── Data fetching ───────────────────────────────────────────
+  const fetchSubs = useCallback(async () => {
+    const res = await fetch('/api/subscriptions')
+    if (res.status === 401) { router.replace('/login'); return }
+    const data = await res.json()
+    setSubs(data || [])
     setLoading(false)
-  }
+  }, [])
 
-  async function logout() {
-    await supabase.auth.signOut()
-    router.replace('/login')
-  }
+  useEffect(() => { fetchSubs() }, [fetchSubs])
 
+  // ── CRUD helpers ────────────────────────────────────────────
   async function saveSub(sub: Subscription) {
-    setSaving(true)
-    const payload = {
-      name: sub.name,
-      price: sub.price || null,
-      price_currency: sub.price_currency || '€',
-      cycle: sub.cycle,
-      renew_date: sub.renew_date || null,
-      cat: sub.cat,
-      intro_price: sub.intro_price || null,
-      intro_until: sub.intro_until || null,
-      payment_method: sub.payment_method,
-      domain: sub.domain || '',
-      status: sub.status || 'actief',
-    }
-    if (sub.id) {
-      await supabase.from('subscriptions').update(payload).eq('id', sub.id)
-    } else {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session) { setSaving(false); return }
-      const { data } = await supabase.from('subscriptions').insert({
-        ...payload, user_id: session.user.id, family_id: familyId || null,
-      }).select().single()
-      if (data) {
-        setSubs(prev => prev.map(s => s === sub ? normalize(data) : s))
-        setSaving(false); return
-      }
-    }
-    setSaving(false)
-  }
-
-  async function deleteSub(sub: Subscription) {
-    if (sub.id) await supabase.from('subscriptions').delete().eq('id', sub.id)
-    setSubs(prev => prev.filter(s => s !== sub))
-  }
-
-  async function addFromSuggestion(item: { name: string; price: number; cycle: 'maand' | 'jaar'; domain: string }) {
-    const already = subs.find(s => s.name.toLowerCase() === item.name.toLowerCase())
-    if (already) {
-      if (!already.renew_date && !already.payment_method) deleteSub(already)
-      return
-    }
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!session) return
-    const { data } = await supabase.from('subscriptions').insert({
-      user_id: session.user.id, family_id: familyId || null,
-      name: item.name, price: item.price, price_currency: '€',
-      cycle: item.cycle, renew_date: null, cat: activeCat,
-      intro_price: null, intro_until: null, payment_method: '', domain: item.domain, status: 'actief',
-    }).select().single()
-    if (data) setSubs(prev => [...prev, normalize(data)])
-  }
-
-  async function addBlank() {
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!session) return
-    const { data } = await supabase.from('subscriptions').insert({
-      user_id: session.user.id, family_id: familyId || null,
-      name: '', price: null, price_currency: '€', cycle: 'maand',
-      renew_date: null, cat: 'Overig', intro_price: null,
-      intro_until: null, payment_method: '', domain: '', status: 'actief',
-    }).select().single()
-    if (data) {
-      const newSub = normalize(data)
-      setSubs(prev => [...prev, newSub])
-      setExpandedIds(prev => new Set([...prev, data.id]))
-    }
-  }
-
-  function updateField(index: number, field: keyof Subscription, value: string | null) {
-    setSubs(prev => {
-      const updated = [...prev]
-      updated[index] = { ...updated[index], [field]: value }
-      return updated
+    const method = sub.id ? 'PATCH' : 'POST'
+    await fetch('/api/subscriptions', {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(sub),
     })
-    const key = `${index}-${field}`
-    clearTimeout(debounceTimers.current[key])
-    debounceTimers.current[key] = setTimeout(() => {
-      setSubs(prev => { saveSub(prev[index]); return prev })
-    }, 800)
+    fetchSubs()
   }
 
-  function toggleExpanded(id: string) {
-    setExpandedIds(prev => {
+  async function deleteSub(id: string) {
+    await fetch(`/api/subscriptions?id=${id}`, { method: 'DELETE' })
+    fetchSubs()
+  }
+
+  async function updateField(sub: Subscription, fields: Partial<Subscription>) {
+    await fetch('/api/subscriptions', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: sub.id, ...fields }),
+    })
+    fetchSubs()
+  }
+
+  // ── Accordion helpers ───────────────────────────────────────
+  function toggleAccordion(id: string) {
+    setOpenAccordions(prev => {
       const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
+      next.has(id) ? next.delete(id) : next.add(id)
       return next
     })
   }
 
-  function exportCSV() {
-    const rows = [['Naam','Prijs','Valuta','Cyclus','Verlengdatum','Categorie','Status','Introprijs','Intro t/m','Betaling','Per maand (EUR)']]
-    subs.forEach(s => rows.push([
-      s.name, String(s.price), s.price_currency, s.cycle, s.renew_date || '',
-      s.cat, s.status, String(s.intro_price || ''), s.intro_until || '',
-      s.payment_method || '', effectiveMonthlyEUR(s).toFixed(2)
-    ]))
-    const csv = rows.map(r => r.map(v => `"${v}"`).join(',')).join('\n')
-    const a = document.createElement('a')
-    a.href = 'data:text/csv;charset=utf-8,\uFEFF' + encodeURIComponent(csv)
-    a.download = 'abonnementen.csv'
-    a.click()
+  function openAccordion(id: string) {
+    setOpenAccordions(prev => new Set([...prev, id]))
   }
 
-  // ── Family sharing ──────────────────────────────────────
-  async function createFamily() {
-    setFamilyStatus('saving')
-    const newId = crypto.randomUUID()
-    await supabase.from('subscriptions').update({ family_id: newId }).eq('user_id', userId)
-    await supabase.from('profiles').update({ family_id: newId }).eq('id', userId)
-    setFamilyId(newId)
-    setFamilyStatus('success')
-    setFamilyMsg('Gezinscode aangemaakt!')
+  // ── Add modal ───────────────────────────────────────────────
+  function openAddModal(prefill?: Partial<Subscription>) {
+    setAddPrefill(prefill || null)
+    setAddStep('upload')
+    setAddExtracted(null)
+    setAddError('')
+    setAddOpen(true)
   }
 
-  async function joinFamily() {
-    const input = familyInput.trim()
-    if (!input) return
-    const { data: existing } = await supabase.from('profiles').select('id').eq('family_id', input).limit(1)
-    if (!existing || existing.length === 0) {
-      setFamilyStatus('error'); setFamilyMsg('Onbekende gezinscode.'); return
+  async function handleFileForAdd(file: File) {
+    setAddLoading(true)
+    setAddError('')
+    try {
+      const base64 = await fileToBase64(file)
+      const ext = file.name.split('.').pop()?.toLowerCase() || 'jpg'
+      const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', pdf: 'application/pdf' }
+      const mediaType = file.type || mimeMap[ext] || 'image/jpeg'
+
+      const res = await fetch('/api/extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base64, mediaType, subName: addPrefill?.name, cat: addPrefill?.cat || activeCat }),
+      })
+      if (!res.ok) throw new Error((await res.json()).error || 'Fout bij AI analyse')
+      const extracted: ExtractedContract = await res.json()
+      setAddExtracted(extracted)
+      setAddStep('review')
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : 'Onbekende fout')
     }
-    setFamilyStatus('saving')
-    await supabase.from('subscriptions').update({ family_id: input }).eq('user_id', userId)
-    await supabase.from('profiles').update({ family_id: input }).eq('id', userId)
-    setFamilyId(input)
-    setFamilyStatus('success')
-    setFamilyMsg('Gekoppeld!')
-    await loadSubs(userId, input)
+    setAddLoading(false)
   }
 
-  async function leaveFamily() {
-    if (!confirm('Weet je zeker dat je wilt verlaten?')) return
-    await supabase.from('subscriptions').update({ family_id: null }).eq('user_id', userId)
-    await supabase.from('profiles').update({ family_id: null }).eq('id', userId)
-    setFamilyId(null); setFamilyStatus('idle'); setFamilyMsg('')
-    await loadSubs(userId, null)
+  async function confirmAdd(data: any) {
+    const cat = data.cat || addPrefill?.cat || activeCat
+    let kenmerken = data.kenmerken || []
+    if (!kenmerken.length) kenmerken = defaultKenmerken(cat)
+
+    await saveSub({
+      name: data.name || '',
+      price: data.price || 0,
+      price_currency: data.price_currency || '€',
+      cycle: (data.cycle || 'maand') as 'maand' | 'kwartaal' | 'jaar',
+      renew_date: data.renew_date || '',
+      cat,
+      payment_method: data.payment_method || '',
+      domain: addPrefill?.domain || '',
+      status: 'actief',
+      kenmerken,
+      price_history: [],
+    })
+    setAddOpen(false)
   }
 
-  function copyCode() {
-    if (!familyId) return
-    navigator.clipboard.writeText(familyId)
-    setCopyLabel('Gekopieerd!')
-    setTimeout(() => setCopyLabel('Kopieer'), 2000)
+  // ── AI upload for existing sub ───────────────────────────────
+  async function handleAiUpload(sub: Subscription, file: File) {
+    setAiLoading(true)
+    setAiUploadSub(sub)
+    try {
+      const base64 = await fileToBase64(file)
+      const ext = file.name.split('.').pop()?.toLowerCase() || 'jpg'
+      const mimeMap: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', pdf: 'application/pdf' }
+      const mediaType = file.type || mimeMap[ext] || 'image/jpeg'
+
+      const res = await fetch('/api/extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base64, mediaType, subName: sub.name, cat: sub.cat }),
+      })
+      const extracted: ExtractedContract = await res.json()
+
+      // Apply extracted data to sub
+      const updates: Partial<Subscription> = {}
+      if (extracted.naam) updates.name = extracted.naam
+      if (extracted.prijs) updates.price = extracted.prijs
+      if (extracted.cyclus) updates.cycle = extracted.cyclus as Subscription['cycle']
+      if (extracted.verlengdatum) updates.renew_date = extracted.verlengdatum
+
+      // Merge kenmerken
+      const existing = sub.kenmerken || []
+      const aiKenm = extracted.kenmerken || []
+      const merged = [...aiKenm.map(k => ({ key: k.key, value: k.value }))]
+      defaultKenmerken(sub.cat).forEach(d => {
+        if (!merged.some(m => m.key.toLowerCase() === d.key.toLowerCase())) merged.push(d)
+      })
+      updates.kenmerken = merged
+
+      await updateField(sub, updates)
+    } catch (e) {
+      console.error(e)
+    }
+    setAiLoading(false)
+    setAiUploadSub(null)
   }
 
-  // ── Derived ─────────────────────────────────────────────
-  const activeSubs = subs.filter(s => s.status !== 'opgezegd')
+  // ── Overstap wizard ──────────────────────────────────────────
+  async function confirmOverstap() {
+    if (!overstapSub) return
+    const newSub: Subscription = {
+      name: overstapData.nieuweNaam || 'Nieuwe aanbieder',
+      price: parseFloat(overstapData.nieuwePrijs) || 0,
+      price_currency: overstapSub.price_currency,
+      cycle: overstapData.nieuweCyclus as Subscription['cycle'],
+      renew_date: '',
+      cat: overstapSub.cat,
+      payment_method: overstapSub.payment_method,
+      domain: '',
+      status: 'actief',
+      predecessor_id: overstapSub.id,
+      kenmerken: defaultKenmerken(overstapSub.cat),
+      price_history: [],
+    }
+    const res = await fetch('/api/subscriptions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newSub),
+    })
+    const created = await res.json()
+
+    await updateField(overstapSub, {
+      status: 'opgezegd',
+      renew_date: overstapData.opzegDatum || overstapSub.renew_date,
+      successor_id: created.id,
+    })
+
+    setOverstapOpen(false)
+    fetchSubs()
+  }
+
+  // ── Prognose ─────────────────────────────────────────────────
+  function buildPrognose() {
+    const now = new Date()
+    const months = []
+    for (let i = 0; i < 36; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
+      const activeSubs = subs.filter(s => {
+        if (s.status === 'opgezegd') {
+          if (!s.renew_date) return false
+          return d <= new Date(s.renew_date)
+        }
+        return true
+      })
+      const total = activeSubs.reduce((t, s) => t + effectiveMonthlyEURForDate(s, d), 0)
+
+      const events: { name: string; detail: string; delta: number }[] = []
+      subs.filter(s => s.status !== 'opgezegd').forEach(s => {
+        ;(s.price_history || []).forEach(ph => {
+          if (!ph.valid_from) return
+          const phd = new Date(ph.valid_from)
+          if (phd.getFullYear() === d.getFullYear() && phd.getMonth() === d.getMonth()) {
+            const prev = parseFloat(String(s.price)) || 0
+            const delta = (ph.price - prev) / (s.cycle === 'jaar' ? 12 : s.cycle === 'kwartaal' ? 3 : 1)
+            events.push({ name: s.name, detail: `→ ${fmt(ph.price)}/${s.cycle}${ph.note ? ' · ' + ph.note : ''}`, delta })
+          }
+        })
+      })
+
+      months.push({
+        yr: d.getFullYear(), mo: d.getMonth(), total, events,
+        label: d.toLocaleDateString('nl-NL', { month: 'short', year: '2-digit' }),
+        date: d,
+      })
+    }
+    return months
+  }
+
+  // ── Totals ────────────────────────────────────────────────────
+  const activeSubs = subs.filter(s => s.status === 'actief')
+  const totalMonthly = activeSubs.reduce((t, s) => t + toMonthlyEUR(s), 0)
+  const totalYearly = totalMonthly * 12
   const cancelledSubs = subs.filter(s => s.status === 'opgezegd')
-  const totalNow = activeSubs.reduce((t, s) => t + effectiveMonthlyEUR(s), 0)
-  const totalSaved = cancelledSubs.reduce((t, s) => t + effectiveMonthlyEUR(s) * 12, 0)
-  const expiringSoon = activeSubs.filter(s => { const d = daysUntil(s.renew_date); return d !== null && d >= 0 && d <= 7 })
-
-  function renderBadge(s: Subscription) {
-    if (s.status === 'opgezegd') return <span className="badge badge-cancelled">Opgezegd</span>
-    const days = daysUntil(s.renew_date)
-    const introDays = daysUntil(s.intro_until)
-    return (
-      <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-        {days !== null && days <= 7 && days >= 0 && <span className="badge badge-soon">verlengt over {days}d</span>}
-        {days !== null && days > 7 && days <= 30 && <span className="badge badge-ok">over {days}d</span>}
-        {introActive(s) && introDays !== null && <span className="badge badge-intro">intro {introDays}d</span>}
-      </span>
-    )
-  }
-
-  function Logo({ domain, catIcon, size = 'sm' }: { domain: string; catIcon: string; size?: 'sm' | 'lg' }) {
-    const [failed, setFailed] = useState(false)
-    const sz = size === 'sm' ? 24 : 28
-    const radius = size === 'sm' ? 5 : 7
-    if (!domain || failed) {
-      return (
-        <span style={{ width: sz, height: sz, borderRadius: radius, background: '#F4F3EF', border: '1px solid #E4E3DE', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: size === 'sm' ? 13 : 14, flexShrink: 0 }}>
-          {catIcon}
-        </span>
-      )
+  const savedMonthly = cancelledSubs.reduce((t, s) => {
+    if (s.successor_id) {
+      const succ = subs.find(x => x.id === s.successor_id)
+      return t + (toMonthlyEUR(s) - (succ ? toMonthlyEUR(succ) : 0))
     }
+    return t + toMonthlyEUR(s)
+  }, 0)
+
+  // ── Render helpers ────────────────────────────────────────────
+  function LogoImg({ domain, cat }: { domain: string; cat: string }) {
+    const icon = CATS[cat]?.icon || '📌'
+    const url = logoUrl(domain)
+    if (!url) return <span style={{ fontSize: 18 }}>{icon}</span>
     return (
       <img
-        src={logoUrl(domain)} alt="" width={sz} height={sz}
-        style={{ borderRadius: radius, objectFit: 'contain', background: '#fff', border: '1px solid #E4E3DE', padding: 2, flexShrink: 0 }}
-        onLoad={e => { const img = e.target as HTMLImageElement; if (img.naturalWidth <= 16) setFailed(true) }}
-        onError={() => setFailed(true)}
+        src={url}
+        alt=""
+        width={24}
+        height={24}
+        style={{ borderRadius: 6, objectFit: 'contain' }}
+        onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
       />
     )
   }
 
-  if (loading) return <div style={{ padding: '3rem', textAlign: 'center', color: '#aaa' }}>Laden...</div>
+  // ── Logout ────────────────────────────────────────────────────
+  async function handleLogout() {
+    await (supabase as any).auth.signOut()
+    router.replace('/login')
+  }
 
+  if (loading) return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: '#71717A' }}>
+      Laden…
+    </div>
+  )
+
+  // ── JSX ───────────────────────────────────────────────────────
   return (
-    <div>
-      {/* Notificatie */}
-      {!notifDismissed && expiringSoon.length > 0 && (
-        <div className="notif-banner">
-          <span>🔔</span>
-          <span>
-            <strong>{expiringSoon.length === 1 ? expiringSoon[0].name : `${expiringSoon.length} abonnementen`}</strong>
-            {' '}verlengt binnenkort:{' '}
-            {expiringSoon.map(s => { const d = daysUntil(s.renew_date); return `${s.name} (${d === 0 ? 'vandaag' : `over ${d}d`})` }).join(', ')}
-          </span>
-          <button className="notif-close" onClick={() => setNotifDismissed(true)}>✕</button>
-        </div>
-      )}
+    <div className="app-container">
 
-      {/* Nav */}
-      <nav className="main-nav">
+      {/* NAV */}
+      <nav className="nav">
         <div className="nav-tabs">
-          {(['beheer','overzicht','inzichten','delen'] as Panel[]).map(p => (
-            <button key={p} className={`main-tab${panel === p ? ' active' : ''}`}
-              onClick={() => { setPanel(p); setAnalyseCat(null) }}>
-              {p === 'beheer' ? 'Abonnementen' : p.charAt(0).toUpperCase() + p.slice(1)}
-              {p === 'inzichten' ? ' ✦' : ''}
-              {p === 'delen' && familyId ? <span className="family-dot">●</span> : null}
+          {(['beheer', 'overzicht', 'prognose', 'inzichten', 'delen'] as Panel[]).map(p => (
+            <button key={p} className={`tab${panel === p ? ' active' : ''}`} onClick={() => setPanel(p)}>
+              {p === 'beheer' ? 'Abonnementen' : p === 'prognose' ? 'Prognose 36m' : p.charAt(0).toUpperCase() + p.slice(1)}
             </button>
           ))}
         </div>
-        <div className="nav-user">
-          <span className="nav-email">{userEmail}</span>
-          <button className="logout-btn" onClick={logout}>Uitloggen</button>
-          {saving && <span className="saving">opslaan...</span>}
-        </div>
       </nav>
 
-      <div className="container">
+      {/* ── BEHEER ── */}
+      {panel === 'beheer' && (
+        <div className="panel">
+          {/* Totals */}
+          <div className="totals">
+            <div className="total-card"><div className="lbl">Per maand</div><div className="val">{fmt(totalMonthly)}</div></div>
+            <div className="total-card"><div className="lbl">Per jaar</div><div className="val">{fmt(totalYearly)}</div></div>
+            {savedMonthly > 0 && <div className="total-card"><div className="lbl">Bespaard</div><div className="val" style={{ color: 'var(--green)' }}>{fmt(savedMonthly)}/mnd</div></div>}
+          </div>
 
-        {/* ── BEHEER ── */}
-        {panel === 'beheer' && (
-          <>
-            {/* Totalen */}
-            <div className="totals">
-              <div className="total-card"><div className="label">Per maand</div><div className="value">{fmt(totalNow)}</div></div>
-              <div className="total-card"><div className="label">Per jaar</div><div className="value">{fmt(totalNow * 12)}</div></div>
-              <div className="total-card">
-                <div className="label">Actief</div>
-                <div className="value">{activeSubs.length} <span style={{ fontSize: 13, color: '#8A8A8F', fontFamily: 'inherit', fontWeight: 400 }}>/ {subs.length}</span></div>
-              </div>
-              {totalSaved > 0 && (
-                <div className="total-card" style={{ borderColor: '#b5d97a', background: '#EAF3DE' }}>
-                  <div className="label" style={{ color: '#3B6D11' }}>Bespaard (/jr)</div>
-                  <div className="value" style={{ color: '#3B6D11' }}>{fmt(totalSaved)}</div>
-                </div>
-              )}
-            </div>
-
-            {/* Export */}
-            <div className="export-row">
-              <button className="export-btn" onClick={exportCSV}>📄 Export CSV</button>
-              <button className="export-btn" onClick={() => window.print()}>🖨️ Print / PDF</button>
-            </div>
-
-            {/* Suggesties */}
-            <div className="section-label">Snel toevoegen</div>
-            <div className="cat-pills">
-              {CAT_NAMES.map(cat => (
-                <button key={cat} className={`cat-pill${activeCat === cat ? ' active' : ''}`} onClick={() => setActiveCat(cat)}>
-                  {CATS[cat].icon} {cat}
-                </button>
-              ))}
-            </div>
-
-            {activeCat === 'Overig' ? (
-              <div className="suggestions-grid" style={{ marginBottom: '1.5rem' }}>
-                <button className="suggestion" style={{ borderStyle: 'dashed', gridColumn: '1/-1', justifyContent: 'center', gap: 8 }} onClick={addBlank}>
-                  <span style={{ fontSize: 16 }}>+</span>
-                  <span><div className="s-name">Zelf toevoegen</div><div className="s-price">Voer naam en bedrag in</div></span>
-                </button>
-              </div>
-            ) : (
-              <div className="suggestions-grid">
-                {CATS[activeCat]?.items.map(item => {
-                  const added = subs.some(s => s.name.toLowerCase() === item.name.toLowerCase())
-                  const existing = subs.find(s => s.name.toLowerCase() === item.name.toLowerCase())
-                  const isReal = existing && (existing.renew_date || existing.payment_method)
-                  return (
-                    <button key={item.name} className={`suggestion${added ? ' added' : ''}${isReal ? ' real' : ''}`} onClick={() => addFromSuggestion(item)}>
-                      <Logo domain={item.domain} catIcon={CATS[activeCat].icon} size="sm" />
-                      <span>
-                        <div className="s-name">{item.name}</div>
-                        <div className="s-price">{fmt(item.price)}/{item.cycle}</div>
-                      </span>
-                      {added && <span className="s-check">{isReal ? '●' : '✓'}</span>}
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-
-            <hr className="divider" />
-
-            {/* Sub lijst */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-              <div className="section-label" style={{ marginBottom: 0 }}>Mijn abonnementen</div>
-              <button onClick={() => {
-                if (expandedIds.size === subs.length) setExpandedIds(new Set())
-                else setExpandedIds(new Set(subs.map(s => s.id!).filter(Boolean)))
-              }} style={{ fontSize: 12, color: '#8A8A8F', background: 'none', border: '1px solid #E4E3DE', borderRadius: 6, padding: '4px 10px' }}>
-                {expandedIds.size === subs.length ? 'Alles inklappen' : 'Alles uitklappen'}
+          {/* Category pills */}
+          <div className="cat-pills">
+            {CAT_NAMES.map(c => (
+              <button key={c} className={`cat-pill${activeCat === c ? ' active' : ''}`} onClick={() => setActiveCat(c)}>
+                {CATS[c].icon} {c}
               </button>
-            </div>
+            ))}
+          </div>
 
-            <div className="sub-list">
-              {subs.map((s, i) => {
-                const isExpanded = expandedIds.has(s.id!)
-                const isCancelled = s.status === 'opgezegd'
-                const days = daysUntil(s.renew_date)
-                const isExpiring = !isCancelled && days !== null && days >= 0 && days <= 7
-                const monthlyEUR = effectiveMonthlyEUR(s)
-                const renewFmt = s.renew_date ? new Date(s.renew_date).toLocaleDateString('nl-NL', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—'
-                const catIcon = CATS[s.cat]?.icon || '📌'
-
+          {/* Quick add suggestions */}
+          {CATS[activeCat]?.items.length > 0 && (
+            <div className="suggestions-grid">
+              {CATS[activeCat].items.map(item => {
+                const exists = subs.some(s => s.name.toLowerCase() === item.name.toLowerCase())
                 return (
-                  <div key={s.id || i}>
-                    {/* Collapsed row */}
-                    <div
-                      className={`sub-row-collapsed${isExpiring ? ' expiring' : ''}${isExpanded ? ' expanded' : ''}${isCancelled ? ' cancelled' : ''}`}
-                      onClick={() => s.id && toggleExpanded(s.id)}
-                    >
-                      <Logo domain={s.domain} catIcon={catIcon} size="lg" />
-                      <span className="sub-row-name" style={isCancelled ? { textDecoration: 'line-through', color: '#8A8A8F' } : {}}>
-                        {s.name || '(geen naam)'}
-                      </span>
-                      <div className="sub-row-meta">
-                        <span className="sub-row-price" style={isCancelled ? { textDecoration: 'line-through', color: '#8A8A8F' } : {}}>{fmt(monthlyEUR)}/mnd</span>
-                        <span className="sub-row-cycle">{s.cycle}</span>
-                        <span className="sub-row-date">{renewFmt}</span>
-                        <div className="sub-row-badges">{renderBadge(s)}</div>
-                      </div>
-                      <span className={`expand-chevron${isExpanded ? ' open' : ''}`}>▶</span>
-                      <button className="sub-del-sm" onClick={e => { e.stopPropagation(); deleteSub(s) }}>✕</button>
-                    </div>
-
-                    {/* Expanded detail */}
-                    {isExpanded && (
-                      <div className="sub-detail">
-                        <div className="field-label" style={{ marginBottom: 4 }}>Naam</div>
-                        <input className="sub-name-edit" type="text" value={s.name} placeholder="Naam abonnement"
-                          onChange={e => updateField(i, 'name', e.target.value)} />
-
-                        <div className="sub-fields">
-                          <div className="field-group">
-                            <div className="field-label">Prijs (invoervaluta)</div>
-                            <div className="price-row">
-                              <select className="cur-select-small" value={s.price_currency || '€'} onChange={e => updateField(i, 'price_currency', e.target.value)}>
-                                <option>€</option><option>$</option>
-                              </select>
-                              <input className="field-input" type="number" value={String(s.price)} min="0" step="0.01"
-                                style={{ flex: 1, textAlign: 'right' }} onChange={e => updateField(i, 'price', e.target.value)} />
-                            </div>
-                            {s.price_currency === '$' && (
-                              <div className="converted-note">≈ € {(parseFloat(String(s.price)) / USD_RATE).toFixed(2).replace('.', ',')} / {s.cycle}</div>
-                            )}
-                          </div>
-
-                          <div className="field-group">
-                            <div className="field-label">Cyclus</div>
-                            <select className="field-input" value={s.cycle} onChange={e => updateField(i, 'cycle', e.target.value)}>
-                              <option value="maand">per maand</option>
-                              <option value="kwartaal">per kwartaal</option>
-                              <option value="jaar">per jaar</option>
-                            </select>
-                          </div>
-
-                          <div className="field-group">
-                            <div className="field-label">Verlengdatum</div>
-                            <input className="field-input" type="date" value={s.renew_date || ''} onChange={e => updateField(i, 'renew_date', e.target.value)} />
-                          </div>
-
-                          <div className="field-group">
-                            <div className="field-label">Betaling</div>
-                            <select className="field-input" value={s.payment_method || ''} onChange={e => updateField(i, 'payment_method', e.target.value)}>
-                              <option value="">— kies —</option>
-                              {PAYMENT_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
-                            </select>
-                          </div>
-
-                          <div className="field-group">
-                            <div className="field-label">Categorie</div>
-                            <select className="field-input" value={s.cat || 'Overig'} onChange={e => updateField(i, 'cat', e.target.value)}>
-                              {CAT_NAMES.map(c => <option key={c} value={c}>{CATS[c].icon} {c}</option>)}
-                            </select>
-                          </div>
-
-                          <div className="field-group">
-                            <div className="field-label">Status</div>
-                            <div style={{ display: 'flex', gap: 6 }}>
-                              <button onClick={() => updateField(i, 'status', 'actief')}
-                                style={{ flex: 1, padding: '6px 8px', fontSize: 12, borderRadius: 6, border: `1px solid ${s.status !== 'opgezegd' ? '#3B6D11' : '#E4E3DE'}`, background: s.status !== 'opgezegd' ? '#EAF3DE' : '#FAFAF8', color: s.status !== 'opgezegd' ? '#3B6D11' : '#8A8A8F', fontWeight: s.status !== 'opgezegd' ? 600 : 400, cursor: 'pointer' }}>
-                                🟢 Actief
-                              </button>
-                              <button onClick={() => updateField(i, 'status', 'opgezegd')}
-                                style={{ flex: 1, padding: '6px 8px', fontSize: 12, borderRadius: 6, border: `1px solid ${s.status === 'opgezegd' ? '#A32D2D' : '#E4E3DE'}`, background: s.status === 'opgezegd' ? '#FCEBEB' : '#FAFAF8', color: s.status === 'opgezegd' ? '#A32D2D' : '#8A8A8F', fontWeight: s.status === 'opgezegd' ? 600 : 400, cursor: 'pointer' }}>
-                                🔴 Opgezegd
-                              </button>
-                            </div>
-                            {s.status === 'opgezegd' && (
-                              <div style={{ fontSize: 11, color: '#A32D2D', marginTop: 4 }}>
-                                Telt niet mee in totalen · Besparing: {fmt(effectiveMonthlyEUR(s) * 12)}/jr
-                              </div>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Introductieprijs */}
-                        {s.intro_price !== null && s.intro_price !== undefined && s.intro_price !== '' ? (
-                          <div className="intro-section">
-                            <div className="intro-header">
-                              <span className="intro-label">Introductieprijs</span>
-                              <button className="intro-remove" onClick={() => { updateField(i, 'intro_price', null); updateField(i, 'intro_until', null) }}>Verwijderen</button>
-                            </div>
-                            <div className="intro-fields">
-                              <div className="field-group">
-                                <div className="field-label" style={{ color: '#854F0B' }}>Intro prijs ({s.price_currency})</div>
-                                <input className="intro-input" type="number" value={String(s.intro_price)} min="0" step="0.01"
-                                  onChange={e => updateField(i, 'intro_price', e.target.value)} />
-                              </div>
-                              <div className="field-group">
-                                <div className="field-label" style={{ color: '#854F0B' }}>Geldig t/m</div>
-                                <input className="intro-input" type="date" value={s.intro_until || ''} onChange={e => updateField(i, 'intro_until', e.target.value)} />
-                              </div>
-                            </div>
-                            <div style={{ fontSize: 11, color: '#854F0B', marginTop: 6 }}>
-                              {introActive(s)
-                                ? `Nu: ${s.price_currency}\u00a0${parseFloat(String(s.intro_price)).toFixed(2).replace('.', ',')} → daarna: ${s.price_currency}\u00a0${parseFloat(String(s.price)).toFixed(2).replace('.', ',')}`
-                                : `Introductieprijs verlopen — nu: ${s.price_currency}\u00a0${parseFloat(String(s.price)).toFixed(2).replace('.', ',')}`
-                              }
-                            </div>
-                          </div>
-                        ) : (
-                          <button className="add-intro-btn" onClick={() => updateField(i, 'intro_price', '1')}>
-                            + Introductieprijs toevoegen (bijv. 1e jaar €\u00a01,-)
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                  <button key={item.name}
+                    className={`suggestion-chip${exists ? ' active' : ''}`}
+                    onClick={() => openAddModal({ name: item.name, price: item.price, cycle: item.cycle, domain: item.domain, cat: activeCat })}>
+                    {item.name}
+                  </button>
                 )
               })}
             </div>
-            <button className="add-btn" onClick={addBlank}>+ Zelf toevoegen</button>
-          </>
-        )}
+          )}
 
-        {/* ── OVERZICHT ── */}
-        {panel === 'overzicht' && (
-          <>
-            <div className="totals">
-              <div className="total-card"><div className="label">Per maand</div><div className="value">{fmt(totalNow)}</div></div>
-              <div className="total-card"><div className="label">Per jaar</div><div className="value">{fmt(totalNow * 12)}</div></div>
-              <div className="total-card"><div className="label">Actief</div><div className="value">{activeSubs.length}</div></div>
-              {totalSaved > 0 && (
-                <div className="total-card" style={{ borderColor: '#b5d97a', background: '#EAF3DE' }}>
-                  <div className="label" style={{ color: '#3B6D11' }}>Bespaard (/jr)</div>
-                  <div className="value" style={{ color: '#3B6D11' }}>{fmt(totalSaved)}</div>
-                </div>
-              )}
-            </div>
-            <div className="export-row">
-              <button className="export-btn" onClick={exportCSV}>📄 Export CSV</button>
-              <button className="export-btn" onClick={() => window.print()}>🖨️ Print / PDF</button>
-            </div>
-            {subs.length === 0 ? (
-              <div className="empty-state">Nog geen abonnementen.</div>
-            ) : (
-              <OverzichtCharts subs={activeSubs} totalNow={totalNow} fmt={fmt} />
-            )}
-          </>
-        )}
+          {/* Sub list */}
+          <div className="section-lbl">Mijn abonnementen <button className="logout-btn" onClick={handleLogout}>Uitloggen</button></div>
+          <div className="sub-list">
+            {subs.map(s => {
+              const isExpanded = s.id ? expandedIds.has(s.id) : false
+              const days = daysUntil(s.renew_date)
+              const monthly = toMonthlyEUR(s)
 
-        {/* ── INZICHTEN ── */}
-        {panel === 'inzichten' && (
-          <>
-            <div className="totals">
-              <div className="total-card"><div className="label">Per maand</div><div className="value">{fmt(totalNow)}</div></div>
-              <div className="total-card"><div className="label">Per jaar</div><div className="value">{fmt(totalNow * 12)}</div></div>
-              {totalSaved > 0 && (
-                <div className="total-card" style={{ borderColor: '#b5d97a', background: '#EAF3DE' }}>
-                  <div className="label" style={{ color: '#3B6D11' }}>Bespaard (/jr)</div>
-                  <div className="value" style={{ color: '#3B6D11' }}>{fmt(totalSaved)}</div>
-                </div>
-              )}
-            </div>
-            {analyseCat ? (
-              <AnalyseView cat={analyseCat} subs={activeSubs} fmt={fmt} onBack={() => setAnalyseCat(null)} />
-            ) : (
-              <InzichtenList subs={activeSubs} cancelledSubs={cancelledSubs} totalNow={totalNow} totalSaved={totalSaved} fmt={fmt} onAnalyse={setAnalyseCat} />
-            )}
-          </>
-        )}
-
-        {/* ── DELEN ── */}
-        {panel === 'delen' && (
-          <div className="share-panel">
-            <div className="share-card">
-              <div style={{ fontSize: 28, marginBottom: 12 }}>👨‍👩‍👦</div>
-              <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 6 }}>Data delen met je partner</div>
-              <div style={{ fontSize: 13, color: '#8A8A8F', marginBottom: 20, lineHeight: 1.6 }}>
-                Koppel jullie accounts zodat je samen één lijst bijhoudt.
-              </div>
-              {familyId ? (
-                <>
-                  <div className="share-status connected">● Gekoppeld als gezinsgroep</div>
-                  <div className="share-code-block">
-                    <div style={{ fontSize: 10, color: '#B4B4BA', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 8 }}>Gezinscode</div>
-                    <div className="share-code-row">
-                      <code className="share-code">{familyId}</code>
-                      <button className="copy-btn" onClick={copyCode}>{copyLabel}</button>
+              return (
+                <div key={s.id}>
+                  {/* Collapsed row */}
+                  <div
+                    className={`sub-row-collapsed${s.status === 'opgezegd' ? ' cancelled' : ''}${isExpanded ? ' expanded' : ''}`}
+                    onClick={() => s.id && setExpandedIds(prev => { const n = new Set(prev); n.has(s.id!) ? n.delete(s.id!) : n.add(s.id!); return n })}
+                  >
+                    <div className="sub-row-logo">
+                      <LogoImg domain={s.domain} cat={s.cat} />
                     </div>
-                    <div style={{ fontSize: 12, color: '#8A8A8F' }}>Stuur deze code naar je partner. Die voert hem in onder "Koppelen met code".</div>
+                    <span className="sub-row-name">{s.name || '(geen naam)'}</span>
+                    <div className="sub-row-meta">
+                      <span className="sub-row-price">{fmt(monthly)}/mnd</span>
+                      <span className="sub-row-cycle">{s.cycle}</span>
+                      {s.status === 'opgezegd'
+                        ? <span className="badge badge-cancelled">Opgezegd</span>
+                        : days !== null && days <= 7
+                          ? <span className="badge badge-soon">over {days}d</span>
+                          : days !== null && days <= 30
+                            ? <span className="badge badge-ok">over {days}d</span>
+                            : null}
+                    </div>
+                    <span className={`expand-chevron${isExpanded ? ' open' : ''}`}>▶</span>
+                    <button className="sub-del-sm" onClick={e => { e.stopPropagation(); if (s.id) deleteSub(s.id) }}>✕</button>
                   </div>
-                  {familyStatus === 'success' && <div className="success-msg">{familyMsg}</div>}
-                  <button className="leave-btn" onClick={leaveFamily}>Gezinsgroep verlaten</button>
-                </>
-              ) : (
-                <>
-                  <div className="share-status disconnected">○ Nog niet gekoppeld</div>
-                  <div className="share-options">
-                    <div className="share-option">
-                      <div className="share-option-title">Nieuwe gezinsgroep starten</div>
-                      <div className="share-option-desc">Jij maakt een code aan die je deelt met je partner.</div>
-                      <button className="share-action-btn primary" onClick={createFamily} disabled={familyStatus === 'saving'}>
-                        {familyStatus === 'saving' ? 'Aanmaken...' : '+ Gezinsgroep aanmaken'}
-                      </button>
+
+                  {/* Expanded detail */}
+                  {isExpanded && s.id && (
+                    <div className="sub-detail">
+                      {/* Name + AI button */}
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+                        <input className="sub-name-edit" style={{ flex: 1, marginBottom: 0 }}
+                          defaultValue={s.name}
+                          onBlur={e => updateField(s, { name: e.target.value })} />
+                        <label style={{ flexShrink: 0 }}>
+                          <input type="file" accept=".pdf,image/*" style={{ display: 'none' }}
+                            onChange={e => e.target.files?.[0] && handleAiUpload(s, e.target.files[0])} />
+                          <span className="ai-upload-btn" style={{ cursor: 'pointer' }}>
+                            {aiLoading && aiUploadSub?.id === s.id ? '⏳' : '🤖 AI'}
+                          </span>
+                        </label>
+                      </div>
+
+                      {/* Core fields */}
+                      <div className="sub-fields">
+                        <div className="field-group">
+                          <div className="field-label">Prijs</div>
+                          <div className="price-row">
+                            <select className="cur-select-small" defaultValue={s.price_currency}
+                              onChange={e => updateField(s, { price_currency: e.target.value as '€' | '$' })}>
+                              <option>€</option><option>$</option>
+                            </select>
+                            <input className="field-input" type="number" defaultValue={s.price as number} min={0} step={0.01}
+                              style={{ flex: 1, textAlign: 'right' }}
+                              onBlur={e => updateField(s, { price: parseFloat(e.target.value) || 0 })} />
+                          </div>
+                        </div>
+                        <div className="field-group">
+                          <div className="field-label">Cyclus</div>
+                          <select className="field-input" defaultValue={s.cycle}
+                            onChange={e => updateField(s, { cycle: e.target.value as Subscription['cycle'] })}>
+                            <option value="maand">maand</option>
+                            <option value="kwartaal">kwartaal</option>
+                            <option value="jaar">jaar</option>
+                          </select>
+                        </div>
+                        <div className="field-group">
+                          <div className="field-label">Verlengdatum</div>
+                          <input className="field-input" type="date" defaultValue={s.renew_date}
+                            onBlur={e => updateField(s, { renew_date: e.target.value })} />
+                        </div>
+                        <div className="field-group">
+                          <div className="field-label">Betaling</div>
+                          <select className="field-input" defaultValue={s.payment_method}
+                            onChange={e => updateField(s, { payment_method: e.target.value })}>
+                            <option value="">— kies —</option>
+                            {PAYMENT_METHODS.map(m => <option key={m}>{m}</option>)}
+                          </select>
+                        </div>
+                        <div className="field-group">
+                          <div className="field-label">Categorie</div>
+                          <select className="field-input" defaultValue={s.cat}
+                            onChange={e => {
+                              const newCat = e.target.value
+                              const hasValues = (s.kenmerken || []).some(k => k.value)
+                              updateField(s, {
+                                cat: newCat,
+                                ...(!hasValues ? { kenmerken: defaultKenmerken(newCat) } : {}),
+                              })
+                            }}>
+                            {CAT_NAMES.map(c => <option key={c} value={c}>{CATS[c].icon} {c}</option>)}
+                          </select>
+                        </div>
+
+                        {/* Status trio */}
+                        <div className="field-group">
+                          <div className="field-label">Status</div>
+                          <div className="status-trio">
+                            <button className={`status-btn${s.status === 'actief' ? ' active green' : ''}`}
+                              onClick={() => updateField(s, { status: 'actief' })}>✓ Actief</button>
+                            <button className={`status-btn${overstapSub?.id === s.id ? ' active blue' : ''}`}
+                              onClick={() => { setOverstapSub(s); setOverstapStep(1); setOverstapData({ opzegDatum: '', nieuweNaam: '', nieuwePrijs: String(s.price), nieuweCyclus: s.cycle }); setOverstapOpen(true) }}>
+                              🔄 Overstappen
+                            </button>
+                            <button className={`status-btn${s.status === 'opgezegd' ? ' active red' : ''}`}
+                              onClick={() => updateField(s, { status: 'opgezegd' })}>✕ Opgezegd</button>
+                          </div>
+                          {s.predecessor_id && <div style={{ fontSize: 11, color: '#7C3AED', marginTop: 5 }}>
+                            ↩ Opvolger van {subs.find(x => x.id === s.predecessor_id)?.name}
+                          </div>}
+                          {s.status === 'opgezegd' && s.successor_id && (() => {
+                            const succ = subs.find(x => x.id === s.successor_id)
+                            const net = toMonthlyEUR(s) - (succ ? toMonthlyEUR(succ) : 0)
+                            return <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 5 }}>
+                              Vervangen door <strong>{succ?.name}</strong> · netto {net > 0 ? 'besparing' : 'meerkosten'}: <span style={{ color: net > 0 ? 'var(--green)' : 'var(--red)' }}>{fmt(Math.abs(net))}/mnd</span>
+                            </div>
+                          })()}
+                          {s.status === 'opgezegd' && !s.successor_id && <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 5 }}>Telt niet mee in totalen</div>}
+                        </div>
+                      </div>
+
+                      {/* Kenmerken accordion */}
+                      <AccordionSection
+                        id={`kenm-${s.id}`}
+                        label="📋 Kenmerken"
+                        badge={(s.kenmerken || []).filter(k => k.value).length || (s.kenmerken || []).length || 0}
+                        open={openAccordions.has(`kenm-${s.id}`)}
+                        onToggle={() => {
+                          if (!openAccordions.has(`kenm-${s.id}`)) {
+                            // Auto-populate defaults if no values filled in
+                            const hasValues = (s.kenmerken || []).some(k => k.value)
+                            if (!hasValues) {
+                              const merged = [...(s.kenmerken || [])]
+                              defaultKenmerken(s.cat).forEach(d => {
+                                if (!merged.some(m => m.key.toLowerCase() === d.key.toLowerCase())) merged.push(d)
+                              })
+                              updateField(s, { kenmerken: merged })
+                            }
+                          }
+                          toggleAccordion(`kenm-${s.id}`)
+                        }}
+                      >
+                        {(s.kenmerken || []).map((kv, ki) => (
+                          <div key={ki} className="kenmerk-row">
+                            <input className="kenmerk-key" type="text" defaultValue={kv.key} placeholder="Kenmerk"
+                              onBlur={e => {
+                                const updated = [...(s.kenmerken || [])]
+                                updated[ki] = { ...updated[ki], key: e.target.value }
+                                updateField(s, { kenmerken: updated })
+                              }} />
+                            <input className="kenmerk-val" type="text" defaultValue={kv.value} placeholder="Waarde"
+                              onBlur={e => {
+                                const updated = [...(s.kenmerken || [])]
+                                updated[ki] = { ...updated[ki], value: e.target.value }
+                                updateField(s, { kenmerken: updated })
+                              }} />
+                            <button className="kenmerk-del" onClick={() => {
+                              const updated = (s.kenmerken || []).filter((_, j) => j !== ki)
+                              updateField(s, { kenmerken: updated })
+                              openAccordion(`kenm-${s.id}`)
+                            }}>✕</button>
+                          </div>
+                        ))}
+                        <button className="kenmerk-add-btn" onClick={() => {
+                          const updated = [...(s.kenmerken || []), { key: '', value: '' }]
+                          updateField(s, { kenmerken: updated })
+                          openAccordion(`kenm-${s.id}`)
+                        }}>+ Kenmerk toevoegen</button>
+                      </AccordionSection>
+
+                      {/* Prijswijzigingen accordion */}
+                      <AccordionSection
+                        id={`prijs-${s.id}`}
+                        label="📈 Prijswijzigingen"
+                        badge={(s.price_history || []).length}
+                        open={openAccordions.has(`prijs-${s.id}`)}
+                        onToggle={() => toggleAccordion(`prijs-${s.id}`)}
+                      >
+                        <div className="prijshist-current">
+                          Nu: <strong>{s.price_currency} {parseFloat(String(s.price)).toFixed(2).replace('.', ',')} / {s.cycle}</strong>
+                        </div>
+                        {(s.price_history || [])
+                          .sort((a, b) => a.valid_from.localeCompare(b.valid_from))
+                          .map((ph, pi) => (
+                            <div key={pi} className="prijshist-row">
+                              <input className="prijshist-input" type="date" defaultValue={ph.valid_from}
+                                onBlur={e => {
+                                  const updated = [...(s.price_history || [])]
+                                  updated[pi] = { ...updated[pi], valid_from: e.target.value }
+                                  updateField(s, { price_history: updated })
+                                }} />
+                              <input className="prijshist-input" type="number" defaultValue={ph.price} min={0} step={0.01}
+                                onBlur={e => {
+                                  const updated = [...(s.price_history || [])]
+                                  updated[pi] = { ...updated[pi], price: parseFloat(e.target.value) || 0 }
+                                  updateField(s, { price_history: updated })
+                                }} />
+                              <input className="prijshist-note" type="text" defaultValue={ph.note || ''} placeholder="Notitie"
+                                onBlur={e => {
+                                  const updated = [...(s.price_history || [])]
+                                  updated[pi] = { ...updated[pi], note: e.target.value }
+                                  updateField(s, { price_history: updated })
+                                }} />
+                              <button className="prijshist-del" onClick={() => {
+                                const updated = (s.price_history || []).filter((_, j) => j !== pi)
+                                updateField(s, { price_history: updated })
+                                openAccordion(`prijs-${s.id}`)
+                              }}>✕</button>
+                            </div>
+                          ))}
+                        <button className="prijshist-add" onClick={() => {
+                          const updated = [...(s.price_history || []), { price: parseFloat(String(s.price)) || 0, valid_from: '', note: '' }]
+                          updateField(s, { price_history: updated })
+                          openAccordion(`prijs-${s.id}`)
+                        }}>+ Geplande verhoging</button>
+                      </AccordionSection>
                     </div>
-                    <div className="share-divider">of</div>
-                    <div className="share-option">
-                      <div className="share-option-title">Koppelen met bestaande code</div>
-                      <div className="share-option-desc">Voer de gezinscode in die je van je partner hebt gekregen.</div>
-                      <div className="share-input-row">
-                        <input type="text" className="share-input" placeholder="Plak hier de gezinscode..."
-                          value={familyInput} onChange={e => setFamilyInput(e.target.value)} />
-                        <button className="share-action-btn" onClick={joinFamily} disabled={!familyInput.trim()}>Koppelen</button>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+          <button className="add-btn" onClick={() => openAddModal()}>+ Abonnement toevoegen</button>
+        </div>
+      )}
+
+      {/* ── PROGNOSE ── */}
+      {panel === 'prognose' && (
+        <div className="panel">
+          <PrognosePanel subs={subs} />
+        </div>
+      )}
+
+      {/* ── OVERZICHT ── */}
+      {panel === 'overzicht' && (
+        <div className="panel">
+          <div className="totals">
+            <div className="total-card"><div className="lbl">Per maand</div><div className="val">{fmt(totalMonthly)}</div></div>
+            <div className="total-card"><div className="lbl">Per jaar</div><div className="val">{fmt(totalYearly)}</div></div>
+          </div>
+          <div className="section-lbl">Per categorie</div>
+          {CAT_NAMES.filter(c => subs.some(s => s.cat === c && s.status === 'actief')).map(c => {
+            const catSubs = subs.filter(s => s.cat === c && s.status === 'actief')
+            const catTotal = catSubs.reduce((t, s) => t + toMonthlyEUR(s), 0)
+            return (
+              <div key={c} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 14px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', marginBottom: 6, fontSize: 13 }}>
+                <span>{CATS[c].icon} {c} <span style={{ color: 'var(--muted)' }}>({catSubs.length})</span></span>
+                <span style={{ fontFamily: 'monospace', fontWeight: 500 }}>{fmt(catTotal)}/mnd</span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* ── INZICHTEN ── */}
+      {panel === 'inzichten' && (
+        <div className="panel">
+          <InzichtenPanel subs={subs} />
+        </div>
+      )}
+
+      {/* ── DELEN ── */}
+      {panel === 'delen' && (
+        <div className="panel">
+          <div style={{ padding: '20px 0', fontSize: 14, color: 'var(--muted)' }}>
+            Gezinsdeling komt binnenkort. Je kunt je partner uitnodigen via een gezinscode zodat jullie samen één overzicht hebben.
+          </div>
+        </div>
+      )}
+
+      {/* ── ADD MODAL ── */}
+      {addOpen && (
+        <div className="add-modal-overlay" onClick={e => e.target === e.currentTarget && setAddOpen(false)}>
+          <div className="add-modal">
+            <div className="add-modal-header">
+              <span className="add-modal-title">{addPrefill?.name ? `${addPrefill.name} toevoegen` : 'Abonnement toevoegen'}</span>
+              <button className="ai-modal-close" onClick={() => setAddOpen(false)}>✕</button>
+            </div>
+            <div className="add-modal-body">
+              {addStep === 'upload' && (
+                <>
+                  <label className="drop-zone">
+                    <input type="file" accept=".pdf,image/*" style={{ display: 'none' }}
+                      onChange={e => e.target.files?.[0] && handleFileForAdd(e.target.files[0])} />
+                    <div className="drop-zone-icon">{addLoading ? '⏳' : '📄'}</div>
+                    <div className="drop-zone-title">{addLoading ? 'Contract wordt gelezen…' : 'Sleep je contract hiernaartoe'}</div>
+                    <div className="drop-zone-sub">{addLoading ? 'Even geduld' : 'of klik om te kiezen · PDF, JPG, PNG'}</div>
+                  </label>
+                  {addPrefill?.name && (
+                    <div style={{ marginTop: 12, padding: '10px 12px', background: 'var(--blue-bg)', border: '1px solid #B3D4F5', borderRadius: 'var(--radius-sm)', fontSize: 12.5, color: 'var(--blue)' }}>
+                      💡 AI herkent automatisch prijs, datum en kenmerken van <strong>{addPrefill.name}</strong>.
+                    </div>
+                  )}
+                  {addError && <div className="ai-error" style={{ marginTop: 10 }}>{addError}</div>}
+                  <div className="add-manual-link" onClick={() => setAddStep('manual')}>Liever zelf invullen →</div>
+                </>
+              )}
+
+              {addStep === 'manual' && (
+                <ManualAddForm
+                  prefill={addPrefill}
+                  activeCat={activeCat}
+                  onSubmit={confirmAdd}
+                  onBack={() => setAddStep('upload')}
+                />
+              )}
+
+              {addStep === 'review' && addExtracted && (
+                <ReviewForm
+                  extracted={addExtracted}
+                  prefill={addPrefill}
+                  activeCat={activeCat}
+                  onSubmit={confirmAdd}
+                  onBack={() => setAddStep('upload')}
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── OVERSTAP MODAL ── */}
+      {overstapOpen && overstapSub && (
+        <div className="add-modal-overlay" onClick={e => e.target === e.currentTarget && setOverstapOpen(false)}>
+          <div className="add-modal">
+            <div className="add-modal-header">
+              <span className="add-modal-title">{overstapSub.name} · Overstappen</span>
+              <button className="ai-modal-close" onClick={() => setOverstapOpen(false)}>✕</button>
+            </div>
+            <div className="add-modal-body">
+              <div style={{ display: 'flex', justifyContent: 'center', gap: 5, marginBottom: 16 }}>
+                {[1, 2, 3].map(n => <div key={n} style={{ width: 6, height: 6, borderRadius: '50%', background: n === overstapStep ? 'var(--blue)' : 'var(--border)' }} />)}
+              </div>
+              {overstapStep === 1 && (
+                <div className="overstap-step">
+                  <div className="overstap-step-title">Wanneer zeg je op?</div>
+                  <div className="overstap-step-sub">Huidig: {overstapSub.name} · {fmt(toMonthlyEUR(overstapSub))}/mnd</div>
+                  <div className="add-manual-field">
+                    <label className="add-manual-label">Opzegdatum</label>
+                    <input className="add-manual-input" type="date" value={overstapData.opzegDatum}
+                      onChange={e => setOverstapData(d => ({ ...d, opzegDatum: e.target.value }))} />
+                  </div>
+                </div>
+              )}
+              {overstapStep === 2 && (
+                <div className="overstap-step">
+                  <div className="overstap-step-title">Wat neem je ervoor in de plaats?</div>
+                  <div className="add-manual-form">
+                    <div className="add-manual-field">
+                      <label className="add-manual-label">Naam nieuwe aanbieder</label>
+                      <input className="add-manual-input" type="text" value={overstapData.nieuweNaam} placeholder="bijv. Youfone"
+                        onChange={e => setOverstapData(d => ({ ...d, nieuweNaam: e.target.value }))} />
+                    </div>
+                    <div className="add-manual-row">
+                      <div className="add-manual-field">
+                        <label className="add-manual-label">Prijs (€)</label>
+                        <input className="add-manual-input" type="number" value={overstapData.nieuwePrijs} step={0.01}
+                          onChange={e => setOverstapData(d => ({ ...d, nieuwePrijs: e.target.value }))} />
+                      </div>
+                      <div className="add-manual-field">
+                        <label className="add-manual-label">Cyclus</label>
+                        <select className="add-manual-input" value={overstapData.nieuweCyclus}
+                          onChange={e => setOverstapData(d => ({ ...d, nieuweCyclus: e.target.value }))}>
+                          <option value="maand">Per maand</option>
+                          <option value="kwartaal">Per kwartaal</option>
+                          <option value="jaar">Per jaar</option>
+                        </select>
                       </div>
                     </div>
                   </div>
-                  {familyStatus === 'error' && <div className="error-msg">{familyMsg}</div>}
-                </>
+                </div>
               )}
+              {overstapStep === 3 && (() => {
+                const oudMnd = toMonthlyEUR(overstapSub)
+                const nieuwPrijs = parseFloat(overstapData.nieuwePrijs) || 0
+                let nieuwMnd = nieuwPrijs
+                if (overstapData.nieuweCyclus === 'jaar') nieuwMnd /= 12
+                if (overstapData.nieuweCyclus === 'kwartaal') nieuwMnd /= 3
+                const netto = oudMnd - nieuwMnd
+                return (
+                  <div className="overstap-step">
+                    <div className="overstap-step-title">Samenvatting</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <div style={{ padding: 12, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 13 }}>
+                        <div style={{ color: 'var(--muted)', fontSize: 11, marginBottom: 4 }}>OPGEZEGD</div>
+                        <strong>{overstapSub.name}</strong> · {fmt(oudMnd)}/mnd
+                      </div>
+                      <div style={{ textAlign: 'center', fontSize: 18, color: 'var(--muted)' }}>↓</div>
+                      <div style={{ padding: 12, background: 'var(--green-bg)', border: '1px solid #b5d97a', borderRadius: 'var(--radius-sm)', fontSize: 13 }}>
+                        <div style={{ color: 'var(--green)', fontSize: 11, marginBottom: 4 }}>NIEUW</div>
+                        <strong>{overstapData.nieuweNaam || 'Nieuwe aanbieder'}</strong> · {fmt(nieuwMnd)}/mnd
+                      </div>
+                      <div className={`overstap-netto${netto <= 0 ? ' cost' : ''}`}>
+                        {netto > 0 ? `✓ Netto besparing: ${fmt(netto)}/mnd · ${fmt(netto * 12)}/jaar` : `⚠ Meerkosten: ${fmt(Math.abs(netto))}/mnd`}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })()}
+            </div>
+            <div className="add-modal-footer">
+              <button className="add-secondary-btn" onClick={() => overstapStep > 1 ? setOverstapStep(s => s - 1) : setOverstapOpen(false)}>← Terug</button>
+              <button className="add-primary-btn" onClick={() => overstapStep < 3 ? setOverstapStep(s => s + 1) : confirmOverstap()}>
+                {overstapStep < 3 ? 'Volgende →' : '✓ Verwerken'}
+              </button>
             </div>
           </div>
-        )}
-
-      </div>
+        </div>
+      )}
     </div>
   )
 }
 
-// ── Overzicht Charts ─────────────────────────────────────────
-function OverzichtCharts({ subs, totalNow, fmt }: { subs: Subscription[]; totalNow: number; fmt: (n: number) => string }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const chartRef = useRef<InstanceType<typeof Chart> | null>(null)
+// ── Sub-components ────────────────────────────────────────────
 
-  const catEntries = Object.entries(
-    subs.reduce((acc, s) => {
-      const cat = s.cat || 'Overig'
-      acc[cat] = (acc[cat] || 0) + effectiveMonthlyEUR(s)
-      return acc
-    }, {} as Record<string, number>)
-  ).sort((a, b) => b[1] - a[1])
+function AccordionSection({ id, label, badge, open, onToggle, children }: {
+  id: string; label: string; badge: number; open: boolean; onToggle: () => void; children: React.ReactNode
+}) {
+  return (
+    <div className="accordion-section">
+      <button className="accordion-trigger" onClick={onToggle}>
+        <span className="accordion-trigger-left">{label}</span>
+        <span className="accordion-trigger-right">
+          <span className={`accordion-badge${badge > 0 ? ' filled' : ''}`}>{badge > 0 ? badge : 'leeg'}</span>
+          <span className={`accordion-chevron${open ? ' open' : ''}`}>▶</span>
+        </span>
+      </button>
+      {open && <div className="accordion-body">{children}</div>}
+    </div>
+  )
+}
+
+function ManualAddForm({ prefill, activeCat, onSubmit, onBack }: {
+  prefill: Partial<Subscription> | null
+  activeCat: string
+  onSubmit: (data: any) => void
+  onBack: () => void
+}) {
+  const [cat, setCat] = useState(prefill?.cat || '')
+  const [form, setForm] = useState<{name:string;price:string;cycle:string;renew_date:string;payment_method:string}>({
+    name: prefill?.name || '',
+    price: prefill?.price ? String(prefill.price) : '',
+    cycle: prefill?.cycle || 'maand',
+    renew_date: '',
+    payment_method: '',
+  })
+
+  const defaults = cat ? defaultKenmerken(cat) : []
+  const [kenmerkenVals, setKenmerkenVals] = useState<string[]>(defaults.map(() => ''))
 
   useEffect(() => {
-    if (!canvasRef.current || catEntries.length === 0) return
-    if (chartRef.current) chartRef.current.destroy()
-    chartRef.current = new Chart(canvasRef.current, {
-      type: 'doughnut',
-      data: {
-        labels: catEntries.map(e => e[0]),
-        datasets: [{ data: catEntries.map(e => e[1]), backgroundColor: COLORS.slice(0, catEntries.length), borderWidth: 0 }]
-      },
-      options: { responsive: true, maintainAspectRatio: false, cutout: '60%', plugins: { legend: { display: false } } }
-    })
-    return () => { if (chartRef.current) chartRef.current.destroy() }
-  }, [subs])
+    const d = cat ? defaultKenmerken(cat) : []
+    setKenmerkenVals(d.map(() => ''))
+  }, [cat])
+
+  function handleSubmit() {
+    const defaults2 = cat ? defaultKenmerken(cat) : []
+    const kenmerken = defaults2.map((k, i) => ({ key: k.key, value: kenmerkenVals[i] || '' }))
+    onSubmit({ ...form, price: parseFloat(form.price) || 0, cycle: form.cycle as any, cat: cat || activeCat, kenmerken })
+  }
 
   return (
-    <div className="chart-grid">
-      <div className="chart-card">
-        <div className="chart-title">Per categorie</div>
-        <div className="chart-sub">{fmt(totalNow)} per maand</div>
-        <div style={{ position: 'relative', height: 200 }}>
-          <canvas ref={canvasRef} role="img" aria-label="Taartdiagram" />
+    <div className="add-manual-form">
+      <div className="add-manual-field">
+        <label className="add-manual-label">Naam</label>
+        <input className="add-manual-input" type="text" value={form.name} placeholder="bijv. Netflix"
+          onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
+      </div>
+      <div className="add-manual-row">
+        <div className="add-manual-field">
+          <label className="add-manual-label">Prijs (€)</label>
+          <input className="add-manual-input" type="number" value={form.price} step={0.01} min={0}
+            onChange={e => setForm(f => ({ ...f, price: e.target.value }))} />
         </div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12, fontSize: 12, color: '#8A8A8F' }}>
-          {catEntries.map(([l], i) => (
-            <span key={l} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ width: 8, height: 8, borderRadius: 2, background: COLORS[i], flexShrink: 0, display: 'inline-block' }} />
-              {l}
-            </span>
-          ))}
+        <div className="add-manual-field">
+          <label className="add-manual-label">Cyclus</label>
+          <select className="add-manual-input" value={form.cycle} onChange={e => setForm(f => ({ ...f, cycle: e.target.value }))}>
+            <option value="maand">Per maand</option>
+            <option value="kwartaal">Per kwartaal</option>
+            <option value="jaar">Per jaar</option>
+          </select>
         </div>
       </div>
-      <div className="chart-card">
-        <div className="chart-title">Verdeling</div>
-        <div className="chart-sub">maandelijks per categorie</div>
-        {catEntries.map(([cat, amt], i) => {
-          const pct = totalNow > 0 ? (amt / totalNow * 100) : 0
-          return (
-            <div key={cat} className="cat-row">
-              <div className="cat-left">
-                <span style={{ width: 8, height: 8, borderRadius: '50%', background: COLORS[i], flexShrink: 0, display: 'inline-block' }} />
-                <span>{CATS[cat]?.icon || '📌'} {cat}</span>
-              </div>
-              <div className="cat-right">
-                <div>{fmt(amt)}/mnd</div>
-                <div style={{ fontSize: 11, color: '#B4B4BA' }}>{pct.toFixed(0)}% · {fmt(amt * 12)}/jr</div>
-                <div className="bar-track"><div className="bar-fill" style={{ width: `${pct.toFixed(1)}%`, background: COLORS[i] }} /></div>
-              </div>
+      <div className="add-manual-row">
+        <div className="add-manual-field">
+          <label className="add-manual-label">Verlengdatum</label>
+          <input className="add-manual-input" type="date" value={form.renew_date}
+            onChange={e => setForm(f => ({ ...f, renew_date: e.target.value }))} />
+        </div>
+        <div className="add-manual-field">
+          <label className="add-manual-label">Betaalrekening</label>
+          <select className="add-manual-input" value={form.payment_method} onChange={e => setForm(f => ({ ...f, payment_method: e.target.value }))}>
+            <option value="">— kies —</option>
+            {PAYMENT_METHODS.map(m => <option key={m}>{m}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="add-manual-field">
+        <label className="add-manual-label">Categorie</label>
+        <select className="add-manual-input" value={cat} onChange={e => setCat(e.target.value)}>
+          <option value="">— kies een categorie —</option>
+          {Object.entries(CATS).map(([c, v]) => <option key={c} value={c}>{v.icon} {c}</option>)}
+        </select>
+      </div>
+      {defaults.length > 0 && (
+        <div className="add-manual-field">
+          <label className="add-manual-label">Kenmerken <span style={{ fontWeight: 400, color: 'var(--subtle)' }}>(standaard voor {cat})</span></label>
+          {defaults.map((kv, ki) => (
+            <div key={ki} style={{ display: 'flex', gap: 6, marginBottom: 4 }}>
+              <input className="add-manual-input" style={{ width: '38%' }} type="text" value={kv.key} readOnly />
+              <input className="add-manual-input" style={{ flex: 1 }} type="text" placeholder="Waarde"
+                value={kenmerkenVals[ki] || ''}
+                onChange={e => { const v = [...kenmerkenVals]; v[ki] = e.target.value; setKenmerkenVals(v) }} />
             </div>
-          )
-        })}
+          ))}
+        </div>
+      )}
+      <div className="add-modal-footer" style={{ padding: 0, marginTop: 12 }}>
+        <button className="add-secondary-btn" onClick={onBack}>← Terug</button>
+        <button className="add-primary-btn" onClick={handleSubmit}>Toevoegen</button>
       </div>
     </div>
   )
 }
 
-// ── Inzichten ────────────────────────────────────────────────
-function InzichtenList({ subs, cancelledSubs, totalNow, totalSaved, fmt, onAnalyse }: {
-  subs: Subscription[]; cancelledSubs: Subscription[];
-  totalNow: number; totalSaved: number;
-  fmt: (n: number) => string; onAnalyse: (cat: string) => void
+function ReviewForm({ extracted, prefill, activeCat, onSubmit, onBack }: {
+  extracted: ExtractedContract
+  prefill: Partial<Subscription> | null
+  activeCat: string
+  onSubmit: (data: any) => void
+  onBack: () => void
 }) {
-  const streaming = subs.filter(s => s.cat === 'Streaming')
-  const dollarSubs = subs.filter(s => s.price_currency === '$')
-  const introSubs = subs.filter(s => s.intro_price && s.intro_until && (daysUntil(s.intro_until) ?? -1) >= 0)
-  const cats: Record<string, number> = {}
-  subs.forEach(s => { cats[s.cat || 'Overig'] = (cats[s.cat || 'Overig'] || 0) + 1 })
-  const topCat = Object.entries(cats).sort((a, b) => b[1] - a[1])[0]
-
-  const insights = [
-    cancelledSubs.length > 0 && {
-      icon: 'save', sym: '✓', highlight: true,
-      title: `Bespaard dankzij opzeggen: ${fmt(totalSaved)}/jaar`,
-      body: `Je hebt ${cancelledSubs.length} abonnement${cancelledSubs.length > 1 ? 'en' : ''} opgezegd: ${cancelledSubs.map(s => `${s.name} (${fmt(effectiveMonthlyEUR(s) * 12)}/jr)`).join(', ')}.`,
-      actions: []
-    },
-    streaming.length > 1 && {
-      icon: 'warn', sym: '!', highlight: false,
-      title: `${streaming.length} streamingdiensten — overlap waarschijnlijk`,
-      body: `Je betaalt ${streaming.map(s => s.name).join(', ')} samen ${fmt(streaming.reduce((t, s) => t + effectiveMonthlyEUR(s), 0))}/mnd.`,
-      actions: [{ label: 'Analyseer streaming ↗', cat: 'Streaming', primary: true }]
-    },
-    dollarSubs.length > 0 && {
-      icon: 'info', sym: 'i', highlight: false,
-      title: `${dollarSubs.length} abonnement${dollarSubs.length > 1 ? 'en' : ''} in dollars`,
-      body: `${dollarSubs.map(s => s.name).join(' en ')} worden in USD afgeschreven en automatisch omgerekend naar €.`,
-      actions: []
-    },
-    introSubs.length > 0 && {
-      icon: 'warn', sym: '!', highlight: false,
-      title: `${introSubs.length} introductieprijs loopt binnenkort af`,
-      body: introSubs.map(s => `${s.name}: nog ${daysUntil(s.intro_until)}d, daarna ${s.price_currency}\u00a0${parseFloat(String(s.price)).toFixed(2).replace('.', ',')}/${s.cycle}`).join(' · '),
-      actions: []
-    },
-    topCat && {
-      icon: 'info', sym: 'i', highlight: false,
-      title: `${topCat[0]} is je grootste categorie`,
-      body: `Je hebt ${topCat[1]} abonnement${topCat[1] > 1 ? 'en' : ''} in ${topCat[0]}. Zijn ze allemaal actief in gebruik?`,
-      actions: [{ label: `Analyseer ${topCat[0]} ↗`, cat: topCat[0], primary: false }]
-    },
-    {
-      icon: 'save', sym: '€', highlight: false,
-      title: `Totaal actief: ${fmt(totalNow * 12)} per jaar`,
-      body: `Dat is ${fmt(totalNow)} per maand. ${totalNow < 180 ? 'Je zit onder' : 'Je zit boven'} het Nederlandse gemiddelde van € 180/mnd.`,
-      actions: []
-    },
-  ].filter(Boolean) as { icon: string; sym: string; title: string; body: string; highlight: boolean; actions: { label: string; cat: string; primary: boolean }[] }[]
+  const [form, setForm] = useState<{name:string;price:string;cycle:string;renew_date:string;payment_method:string}>({
+    name: extracted.naam || prefill?.name || '',
+    price: String(extracted.prijs ?? prefill?.price ?? ''),
+    cycle: extracted.cyclus || prefill?.cycle || 'maand',
+    renew_date: extracted.verlengdatum || '',
+    payment_method: '',
+  })
+  const [kenmerken, setKenmerken] = useState<Kenmerk[]>(
+    (extracted.kenmerken || []).map(k => ({ key: k.key, value: k.value }))
+  )
 
   return (
-    <div className="insights-list">
-      {insights.map((ins, idx) => (
-        <div key={idx} className={`insight-card${ins.highlight ? ' highlighted' : ''}`}>
-          <div className={`i-icon ${ins.icon}`}>{ins.sym}</div>
-          <div style={{ flex: 1 }}>
-            <div className="i-title">{ins.title}</div>
-            <div className="i-body">{ins.body}</div>
-            {ins.actions.length > 0 && (
-              <div className="i-actions">
-                {ins.actions.map(a => (
-                  <button key={a.label} className={`i-action-btn${a.primary ? ' primary' : ''}`} onClick={() => onAnalyse(a.cat)}>
-                    {a.label}
-                  </button>
-                ))}
-              </div>
-            )}
+    <div className="add-manual-form">
+      {extracted.samenvatting && (
+        <div className="ai-summary">💡 {extracted.samenvatting}</div>
+      )}
+      <div className="add-manual-field">
+        <label className="add-manual-label">Naam</label>
+        <input className="add-manual-input" type="text" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
+      </div>
+      <div className="add-manual-row">
+        <div className="add-manual-field">
+          <label className="add-manual-label">Prijs (€)</label>
+          <input className="add-manual-input" type="number" value={form.price} step={0.01} onChange={e => setForm(f => ({ ...f, price: e.target.value }))} />
+        </div>
+        <div className="add-manual-field">
+          <label className="add-manual-label">Cyclus</label>
+          <select className="add-manual-input" value={form.cycle} onChange={e => setForm(f => ({ ...f, cycle: e.target.value }))}>
+            <option value="maand">Per maand</option>
+            <option value="kwartaal">Per kwartaal</option>
+            <option value="jaar">Per jaar</option>
+          </select>
+        </div>
+      </div>
+      <div className="add-manual-row">
+        <div className="add-manual-field">
+          <label className="add-manual-label">Verlengdatum</label>
+          <input className="add-manual-input" type="date" value={form.renew_date} onChange={e => setForm(f => ({ ...f, renew_date: e.target.value }))} />
+        </div>
+        <div className="add-manual-field">
+          <label className="add-manual-label">Betaalrekening</label>
+          <select className="add-manual-input" value={form.payment_method} onChange={e => setForm(f => ({ ...f, payment_method: e.target.value }))}>
+            <option value="">— kies —</option>
+            {PAYMENT_METHODS.map(m => <option key={m}>{m}</option>)}
+          </select>
+        </div>
+      </div>
+      {kenmerken.length > 0 && (
+        <div className="add-manual-field">
+          <label className="add-manual-label">Kenmerken (AI herkend)</label>
+          {kenmerken.map((kv, ki) => (
+            <div key={ki} style={{ display: 'flex', gap: 6, marginBottom: 4 }}>
+              <input className="add-manual-input" style={{ width: '38%' }} type="text" value={kv.key}
+                onChange={e => { const u = [...kenmerken]; u[ki] = { ...u[ki], key: e.target.value }; setKenmerken(u) }} />
+              <input className="add-manual-input" style={{ flex: 1 }} type="text" value={kv.value}
+                onChange={e => { const u = [...kenmerken]; u[ki] = { ...u[ki], value: e.target.value }; setKenmerken(u) }} />
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="add-modal-footer" style={{ padding: 0, marginTop: 12 }}>
+        <button className="add-secondary-btn" onClick={onBack}>← Opnieuw</button>
+        <button className="add-primary-btn" onClick={() => onSubmit({ ...form, price: parseFloat(form.price) || 0, cycle: form.cycle as 'maand' | 'kwartaal' | 'jaar', cat: prefill?.cat || activeCat, kenmerken })}>✓ Toevoegen</button>
+      </div>
+    </div>
+  )
+}
+
+function PrognosePanel({ subs }: { subs: Subscription[] }) {
+  const now = new Date()
+  const months: {d:Date;total:number;events:{name:string;detail:string;delta:number}[];label:string}[] = []
+  for (let i = 0; i < 36; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
+    const activeSubs = subs.filter(s => {
+      if (s.status === 'opgezegd') { if (!s.renew_date) return false; return d <= new Date(s.renew_date) }
+      return true
+    })
+    const total = activeSubs.reduce((t, s) => t + effectiveMonthlyEURForDate(s, d), 0)
+    const events: { name: string; detail: string; delta: number }[] = []
+    subs.filter(s => s.status !== 'opgezegd').forEach(s => {
+      ;(s.price_history || []).forEach(ph => {
+        if (!ph.valid_from) return
+        const phd = new Date(ph.valid_from)
+        if (phd.getFullYear() === d.getFullYear() && phd.getMonth() === d.getMonth()) {
+          const base = parseFloat(String(s.price)) || 0
+          let delta = ph.price - base
+          if (s.cycle === 'jaar') delta /= 12
+          if (s.cycle === 'kwartaal') delta /= 3
+          events.push({ name: s.name, detail: `→ ${fmt(ph.price)}/${s.cycle}${ph.note ? ' · ' + ph.note : ''}`, delta })
+        }
+      })
+    })
+    months.push({ d, total, events, label: d.toLocaleDateString('nl-NL', { month: 'short', year: '2-digit' }) })
+  }
+
+  const now0 = months[0].total
+  const end = months[35].total
+  const changeEvents = months.flatMap((m, mi) => m.events.map(ev => ({ ...ev, mi, dateLabel: m.d.toLocaleDateString('nl-NL', { month: 'long', year: 'numeric' }) })))
+
+  return (
+    <>
+      <div className="totals">
+        <div className="total-card"><div className="lbl">Nu / maand</div><div className="val">{fmt(now0)}</div></div>
+        <div className="total-card"><div className="lbl">Over 36 maanden</div><div className="val" style={{ color: end > now0 ? 'var(--red)' : 'var(--green)' }}>{fmt(end)}</div></div>
+      </div>
+      <div className="section-lbl">Geplande wijzigingen</div>
+      {changeEvents.length === 0
+        ? <div style={{ fontSize: 13, color: 'var(--muted)', padding: '12px 0', lineHeight: 1.6 }}>Geen prijswijzigingen ingevoerd. Open een abonnement en voeg een geplande verhoging toe.</div>
+        : changeEvents.map((ev, i) => (
+          <div key={i} className={`prog-event ${ev.delta > 0 ? 'up' : 'down'}`}>
+            <div className="prog-event-icon">{ev.delta > 0 ? '↑' : '↓'}</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 500 }}>{ev.name}</div>
+              <div className="prog-event-date">{ev.dateLabel} · over {ev.mi} mnd</div>
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>{ev.detail}</div>
+            </div>
+            <div className="prog-event-delta">{ev.delta > 0 ? '+' : ''}{fmt(ev.delta)}/mnd</div>
+          </div>
+        ))}
+      <div className="section-lbl" style={{ marginTop: 20 }}>Maandoverzicht</div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+          <thead><tr>
+            <th style={{ textAlign: 'left', padding: '7px 10px', fontSize: 10.5, color: 'var(--subtle)', textTransform: 'uppercase', borderBottom: '1px solid var(--border)' }}>Maand</th>
+            <th style={{ textAlign: 'right', padding: '7px 10px', fontSize: 10.5, color: 'var(--subtle)', textTransform: 'uppercase', borderBottom: '1px solid var(--border)' }}>Per maand</th>
+            <th style={{ textAlign: 'right', padding: '7px 10px', fontSize: 10.5, color: 'var(--subtle)', textTransform: 'uppercase', borderBottom: '1px solid var(--border)' }}>Per jaar</th>
+          </tr></thead>
+          <tbody>
+            {months.slice(0, 12).map((m, i) => {
+              const isNow = m.d.getFullYear() === now.getFullYear() && m.d.getMonth() === now.getMonth()
+              const prev = i > 0 ? months[i - 1].total : m.total
+              const change = m.total - prev
+              return (
+                <tr key={i} style={{ background: isNow ? '#FFFBF0' : m.events.length ? 'var(--blue-bg)' : 'transparent' }}>
+                  <td style={{ padding: '8px 10px', borderBottom: '1px solid #F7F7F5', fontWeight: isNow ? 600 : 400 }}>
+                    {isNow ? '▶ ' : ''}{m.d.toLocaleDateString('nl-NL', { month: 'long' })}{isNow ? ' (nu)' : ''}
+                    {m.events.map((ev, ei) => <span key={ei} style={{ marginLeft: 6, fontSize: 10, padding: '1px 6px', borderRadius: 99, background: ev.delta > 0 ? 'var(--red-bg)' : 'var(--green-bg)', color: ev.delta > 0 ? 'var(--red)' : 'var(--green)' }}>{ev.name}</span>)}
+                  </td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'monospace', borderBottom: '1px solid #F7F7F5' }}>
+                    {fmt(m.total)}
+                    {i > 0 && Math.abs(change) > 0.01 && <span style={{ marginLeft: 6, fontSize: 10, padding: '1px 6px', borderRadius: 99, background: change > 0 ? 'var(--red-bg)' : 'var(--green-bg)', color: change > 0 ? 'var(--red)' : 'var(--green)', fontFamily: 'sans-serif' }}>{change > 0 ? '+' : ''}{fmt(change)}</span>}
+                  </td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'monospace', color: 'var(--muted)', borderBottom: '1px solid #F7F7F5' }}>{fmt(m.total * 12)}/jr</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
+  )
+}
+
+function InzichtenPanel({ subs }: { subs: Subscription[] }) {
+  const activeSubs = subs.filter(s => s.status === 'actief')
+  const totalMonthly = activeSubs.reduce((t, s) => t + effectiveMonthlyEUR(s), 0)
+  const insights: { title: string; body: string; type: 'tip' | 'warning' | 'save' }[] = []
+
+  // Streaming overlap
+  const streamingSubs = activeSubs.filter(s => s.cat === 'Streaming')
+  if (streamingSubs.length >= 3) {
+    const streamTotal = streamingSubs.reduce((t, s) => t + effectiveMonthlyEUR(s), 0)
+    insights.push({ type: 'warning', title: `${streamingSubs.length} streamingdiensten: ${fmt(streamTotal)}/mnd`, body: `Je hebt ${streamingSubs.map(s => s.name).join(', ')}. Mogelijk overlap — kijk of je kunt combineren of rouleren.` })
+  }
+
+  // USD subs
+  const usdSubs = activeSubs.filter(s => s.price_currency === '$')
+  if (usdSubs.length) insights.push({ type: 'tip', title: `${usdSubs.length} abonnement${usdSubs.length > 1 ? 'en' : ''} in dollars`, body: `${usdSubs.map(s => s.name).join(', ')} — wisselkoersrisico. Prijs kan variëren met de dollar.` })
+
+  // Expiring soon
+  const soonSubs = activeSubs.filter(s => { const d = daysUntil(s.renew_date); return d !== null && d >= 0 && d <= 14 })
+  if (soonSubs.length) insights.push({ type: 'warning', title: `${soonSubs.length} abonnement${soonSubs.length > 1 ? 'en' : ''} verlengt binnen 14 dagen`, body: soonSubs.map(s => `${s.name} (over ${daysUntil(s.renew_date)}d)`).join(', ') })
+
+  // Cancelled savings
+  const cancelledSubs = subs.filter(s => s.status === 'opgezegd')
+  if (cancelledSubs.length) {
+    const saved = cancelledSubs.reduce((t, s) => {
+      if (s.successor_id) { const succ = subs.find(x => x.id === s.successor_id); return t + effectiveMonthlyEUR(s) - (succ ? effectiveMonthlyEUR(succ) : 0) }
+      return t + effectiveMonthlyEUR(s)
+    }, 0)
+    if (saved > 0) insights.push({ type: 'save', title: `Bespaard: ${fmt(saved)}/mnd · ${fmt(saved * 12)}/jaar`, body: `Door ${cancelledSubs.length} abonnement${cancelledSubs.length > 1 ? 'en' : ''} op te zeggen of te wisselen.` })
+  }
+
+  if (!insights.length) return <div style={{ fontSize: 13, color: 'var(--muted)', padding: '20px 0' }}>Voeg meer abonnementen toe voor inzichten.</div>
+
+  return (
+    <>
+      {insights.map((ins, i) => (
+        <div key={i} style={{ padding: '14px 16px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', marginBottom: 8, display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+          <div style={{ fontSize: 18, flexShrink: 0 }}>{ins.type === 'save' ? '✓' : ins.type === 'warning' ? '⚠' : '💡'}</div>
+          <div>
+            <div style={{ fontWeight: 500, fontSize: 13, marginBottom: 4 }}>{ins.title}</div>
+            <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.6 }}>{ins.body}</div>
           </div>
         </div>
       ))}
-    </div>
+    </>
   )
 }
 
-// ── Analyse ──────────────────────────────────────────────────
-function AnalyseView({ cat, subs, fmt, onBack }: {
-  cat: string; subs: Subscription[];
-  fmt: (n: number) => string; onBack: () => void
-}) {
-  const catSubs = subs.filter(s => s.cat === cat)
-  const total = catSubs.reduce((t, s) => t + effectiveMonthlyEUR(s), 0)
-  const sorted = [...catSubs].sort((a, b) => effectiveMonthlyEUR(b) - effectiveMonthlyEUR(a))
-
-  return (
-    <div className="analyse-wrap">
-      <div className="analyse-header">
-        <button className="back-btn" onClick={onBack}>← Terug</button>
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 500 }}>{CATS[cat]?.icon} {cat} analyse</div>
-          <div style={{ fontSize: 12, color: '#8A8A8F' }}>{catSubs.length} diensten · {fmt(total)}/mnd · {fmt(total * 12)}/jaar</div>
-        </div>
-      </div>
-
-      <div className="chips-row">
-        {sorted.map((s, i) => (
-          <div key={s.id} className={`sub-chip${i === 0 ? ' hl' : ''}`}>
-            <div className="cn">{s.name}</div>
-            <div className="cp">{fmt(effectiveMonthlyEUR(s))}/mnd</div>
-          </div>
-        ))}
-      </div>
-
-      <div className="insights-list">
-        {catSubs.length > 1 && (
-          <div className="insight-card">
-            <div className="i-icon warn">!</div>
-            <div>
-              <div className="i-title">{fmt(total * 12)}/jaar aan {cat}</div>
-              <div className="i-body">Je hebt {catSubs.length} diensten. Gemiddeld gebruikt een huishouden maar 1-2 actief.</div>
-              <span className="i-saving">Besparing bij opzeggen {sorted[sorted.length - 1]?.name}: {fmt(effectiveMonthlyEUR(sorted[sorted.length - 1]))}/mnd</span>
-            </div>
-          </div>
-        )}
-        <div className="insight-card">
-          <div className="i-icon info">i</div>
-          <div>
-            <div className="i-title">{sorted[0]?.name} is je duurste</div>
-            <div className="i-body">{fmt(effectiveMonthlyEUR(sorted[0]))}/mnd. Gebruik je alle features?</div>
-          </div>
-        </div>
-      </div>
-
-      <div className="deeper-title">Vertel me meer</div>
-      <div className="q-list">
-        {[
-          `Welke ${cat} dienst kan ik het best opzeggen?`,
-          `Zijn er goedkopere alternatieven voor ${sorted[0]?.name || cat}?`,
-          catSubs.length > 1 ? `Gebruik ik ${catSubs.map(s => s.name).join(' en ')} allemaal actief?` : `Is ${sorted[0]?.name || cat} de prijs waard?`
-        ].map(q => (
-          <button key={q} className="q-btn" onClick={() => alert('In de echte app start dit een gesprek met Claude.')}>
-            <span>{q}</span><span className="q-arr">↗</span>
-          </button>
-        ))}
-      </div>
-    </div>
-  )
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((res, rej) => {
+    const r = new FileReader()
+    r.onload = () => res((r.result as string).split(',')[1])
+    r.onerror = rej
+    r.readAsDataURL(file)
+  })
 }

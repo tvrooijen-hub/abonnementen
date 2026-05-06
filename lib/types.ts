@@ -1,5 +1,24 @@
 export type Currency = '€' | '$'
 export type SubStatus = 'actief' | 'opgezegd'
+export type SubCycle = 'maand' | 'kwartaal' | 'jaar'
+
+export type Kenmerk = {
+  id?: string
+  subscription_id?: string
+  user_id?: string
+  key: string
+  value: string
+  sort_order?: number
+}
+
+export type PriceHistory = {
+  id?: string
+  subscription_id?: string
+  user_id?: string
+  price: number
+  valid_from: string
+  note?: string
+}
 
 export type Subscription = {
   id?: string
@@ -7,16 +26,20 @@ export type Subscription = {
   family_id?: string
   name: string
   price: number | string
-  price_currency: '€' | '$'
-  cycle: 'maand' | 'kwartaal' | 'jaar'
+  price_currency: Currency
+  cycle: SubCycle
   renew_date: string
   cat: string
-  intro_price: number | string | null
-  intro_until: string | null
   payment_method: string
   domain: string
   status: SubStatus
+  successor_id?: string | null
+  predecessor_id?: string | null
+  notes?: string
   created_at?: string
+  // joined from related tables
+  kenmerken?: Kenmerk[]
+  price_history?: PriceHistory[]
 }
 
 export const PAYMENT_METHODS = [
@@ -27,7 +50,20 @@ export const PAYMENT_METHODS = [
   'Anders',
 ]
 
-export const CATS: Record<string, { icon: string; items: { name: string; price: number; cycle: 'maand' | 'jaar'; domain: string }[] }> = {
+export const CAT_KENMERKEN: Record<string, { key: string }[]> = {
+  'Mobiel & Internet': [{ key: 'Data' }, { key: 'Bellen' }, { key: 'SMS' }, { key: 'Netwerk' }],
+  'Verzekeringen':     [{ key: 'Dekking' }, { key: 'Eigen risico' }, { key: 'Type' }, { key: 'Looptijd' }],
+  'Streaming':         [{ key: 'Schermen' }, { key: 'Kwaliteit' }, { key: 'Offline' }],
+  'Software':          [{ key: 'Gebruikers' }, { key: 'Opslag' }, { key: 'Platform' }],
+  'Cloud & Opslag':    [{ key: 'Opslag' }, { key: 'Apparaten' }],
+  'Sport & Fitness':   [{ key: 'Type' }, { key: 'Locaties' }],
+  'Games':             [{ key: 'Platform' }, { key: 'Online' }],
+  'Nieuws & Kennis':   [{ key: 'Toegang' }, { key: 'Archief' }],
+  'Wonen':             [{ key: 'Type' }, { key: 'Looptijd' }],
+  'AI':                [{ key: 'Model' }, { key: 'Berichten/mnd' }],
+}
+
+export const CATS: Record<string, { icon: string; items: { name: string; price: number; cycle: SubCycle; domain: string }[] }> = {
   'Streaming': { icon: '🎬', items: [
     { name: 'Netflix', price: 17.99, cycle: 'maand', domain: 'netflix.com' },
     { name: 'Videoland', price: 7.99, cycle: 'maand', domain: 'videoland.com' },
@@ -80,6 +116,8 @@ export const CATS: Record<string, { icon: string; items: { name: string; price: 
     { name: 'KPN Mobiel', price: 25.00, cycle: 'maand', domain: 'kpn.com' },
     { name: 'Vodafone Mobiel', price: 22.00, cycle: 'maand', domain: 'vodafone.nl' },
     { name: 'Odido Mobiel', price: 18.00, cycle: 'maand', domain: 'odido.nl' },
+    { name: 'Youfone', price: 11.50, cycle: 'maand', domain: 'youfone.nl' },
+    { name: 'Ben', price: 18.00, cycle: 'maand', domain: 'ben.nl' },
     { name: 'Ziggo TV', price: 19.00, cycle: 'maand', domain: 'ziggo.nl' },
     { name: 'NPO Plus', price: 5.99, cycle: 'maand', domain: 'npoplus.nl' },
   ]},
@@ -153,36 +191,40 @@ export function daysUntil(dateStr: string | null | undefined): number | null {
   return Math.round((d.getTime() - today.getTime()) / 86400000)
 }
 
-export function introActive(s: Subscription): boolean {
-  if (!s.intro_price || !s.intro_until) return false
-  const days = daysUntil(s.intro_until)
-  return days !== null && days >= 0
-}
-
-export function effectivePrice(s: Subscription): number {
-  if (introActive(s)) return parseFloat(String(s.intro_price)) || 0
-  return parseFloat(String(s.price)) || 0
-}
-
 export function effectiveMonthlyEUR(s: Subscription): number {
-  let p = effectivePrice(s)
-  if (s.price_currency === '$') p = p / USD_RATE
-  return toMonthly(p, s.cycle)
+  // Check price_history for entries that have kicked in
+  const now = new Date()
+  const history = (s.price_history || [])
+    .filter(ph => ph.valid_from && new Date(ph.valid_from) <= now)
+    .sort((a, b) => b.valid_from.localeCompare(a.valid_from))
+  const price = history.length > 0
+    ? history[0].price
+    : parseFloat(String(s.price)) || 0
+  let monthly = price
+  if (s.price_currency === '$') monthly = monthly / USD_RATE
+  return toMonthly(monthly, s.cycle)
+}
+
+export function effectiveMonthlyEURForDate(s: Subscription, date: Date): number {
+  const history = (s.price_history || [])
+    .filter(ph => ph.valid_from && new Date(ph.valid_from) <= date)
+    .sort((a, b) => b.valid_from.localeCompare(a.valid_from))
+  const price = history.length > 0
+    ? history[0].price
+    : parseFloat(String(s.price)) || 0
+  let monthly = price
+  if (s.price_currency === '$') monthly = monthly / USD_RATE
+  return toMonthly(monthly, s.cycle)
 }
 
 export function fmt(n: number): string {
   return '€\u00a0' + n.toFixed(2).replace('.', ',')
 }
 
-export function nextRenewDate(dateStr: string, cycle: 'maand' | 'kwartaal' | 'jaar'): string {
-  if (!dateStr) return dateStr
-  const today = new Date(); today.setHours(0, 0, 0, 0)
-  const d = new Date(dateStr); d.setHours(0, 0, 0, 0)
-  if (d >= today) return dateStr
-  while (d < today) {
-    if (cycle === 'maand') d.setMonth(d.getMonth() + 1)
-    else if (cycle === 'kwartaal') d.setMonth(d.getMonth() + 3)
-    else d.setFullYear(d.getFullYear() + 1)
-  }
-  return d.toISOString().slice(0, 10)
+export function defaultKenmerken(cat: string): Kenmerk[] {
+  return (CAT_KENMERKEN[cat] || []).map((k, i) => ({
+    key: k.key,
+    value: '',
+    sort_order: i,
+  }))
 }
