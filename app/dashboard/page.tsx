@@ -126,6 +126,7 @@ export default function Dashboard() {
           <div className="totals">
             <div className="total-card"><div className="lbl">Per maand</div><div className="val">{fmt(totalMonthly)}</div></div>
             <div className="total-card"><div className="lbl">Per jaar</div><div className="val">{fmt(totalMonthly*12)}</div></div>
+            {savedMonthly > 0.01 && <div className="total-card"><div className="lbl">Bespaard</div><div className="val" style={{color:'var(--green)'}}>{fmt(savedMonthly)}/mnd</div></div>}
           </div>
 
           <div className="cat-pills">
@@ -155,30 +156,15 @@ export default function Dashboard() {
                   <div className={`sub-row-collapsed${s.status==='opgezegd'?' cancelled':''}${isExpanded?' expanded':''}`}
                     onClick={() => setExpandedIds(prev => { const n=new Set(prev); n.has(s.id)?n.delete(s.id):n.add(s.id); return n })}>
                     <div className="sub-row-logo">
-                      <img
-                        src={logoUrl(s.domain)}
-                        width={24}
-                        height={24}
-                        style={{borderRadius:6}}
-                        onError={e => {
-                          (e.target as HTMLImageElement).style.display = 'none'
-                          const fallback = (e.target as HTMLImageElement).nextSibling as HTMLElement
-                          if (fallback) fallback.style.display = 'inline'
-                        }}
-                        alt=""
-                      />
-                      <span style={{fontSize:18, display:'none'}}>{CATS[s.cat]?.icon||'📌'}</span>
+                      {s.domain ? <img src={logoUrl(s.domain)} width={24} height={24} style={{borderRadius:6}} onError={e=>(e.target as any).style.display='none'} alt="" /> : <span style={{fontSize:18}}>{CATS[s.cat]?.icon||'📌'}</span>}
                     </div>
                     <span className="sub-row-name">{s.name||'(geen naam)'}</span>
                     <div className="sub-row-meta">
-                      <span className="sub-row-price">{fmt(monthly * 12)}/jr</span>
-                      {s.status==='opgezegd'
-                        ? <span className="badge badge-cancelled">Opgezegd</span>
-                        : days!==null&&days<=7
-                          ? <span className="badge badge-soon">over {days}d</span>
-                          : days!==null&&days<=30
-                            ? <span className="badge badge-ok">over {days}d</span>
-                            : null}
+                      <span className="sub-row-price">{fmt(monthly)}/mnd</span>
+                      <span className="sub-row-cycle">{s.cycle}</span>
+                      {s.status==='opgezegd' ? <span className="badge badge-cancelled">Opgezegd</span>
+                        : days!==null&&days<=7 ? <span className="badge badge-soon">over {days}d</span>
+                        : days!==null&&days<=30 ? <span className="badge badge-ok">over {days}d</span> : null}
                     </div>
                     <span className={`expand-chevron${isExpanded?' open':''}`}>▶</span>
                     <button className="sub-del-sm" onClick={e=>{e.stopPropagation();deleteSub(s.id)}}>✕</button>
