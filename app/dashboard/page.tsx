@@ -21,7 +21,7 @@ function nullDate(d: string) { return d || null }
 function buildPrognoseData(subs: any[]) {
   const now = new Date()
   const months = []
-  for (let i = 0; i < 36; i++) {
+  for (let i = 0; i < 24; i++) {
     const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
     const yr = d.getFullYear(), mo = d.getMonth()
     const activeSubs = subs.filter(s => {
@@ -112,17 +112,21 @@ function LineChart({ months }: { months: any[] }) {
     const pad = { top: 16, right: 16, bottom: 40, left: 52 }
     const cw = W - pad.left - pad.right, ch = H - pad.top - pad.bottom
     const values = months.map(m => m.total)
-    const minV = Math.max(0, Math.min(...values) * 0.88)
-    const maxV = (Math.max(...values) * 1.05) || 1
+    const rawMin = Math.min(...values)
+    const rawMax = Math.max(...values)
+    const minV = Math.max(0, Math.floor(rawMin * 0.85 / 50) * 50)
+    const maxV = (Math.ceil(rawMax * 1.08 / 50) * 50) || 100
     const xOf = (i: number) => pad.left + (i / (months.length - 1)) * cw
     const yOf = (v: number) => pad.top + ch - ((v - minV) / (maxV - minV)) * ch
     // Grid
     ctx.strokeStyle = 'rgba(0,0,0,.05)'; ctx.lineWidth = 1
-    for (let g = 0; g <= 4; g++) {
-      const y = pad.top + (g / 4) * ch
+    const tickCount = 5
+    for (let g = 0; g <= tickCount; g++) {
+      const v = minV + (maxV - minV) * (1 - g / tickCount)
+      const y = pad.top + (g / tickCount) * ch
       ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + cw, y); ctx.stroke()
       ctx.fillStyle = '#8A8A8F'; ctx.font = `10px 'DM Mono',monospace`; ctx.textAlign = 'right'
-      ctx.fillText(`€${(maxV - (g / 4) * (maxV - minV)).toFixed(0)}`, pad.left - 6, y + 4)
+      ctx.fillText(`€ ${Math.round(v)}`, pad.left - 4, y + 4)
     }
     // X labels
     months.forEach((m, i) => {
@@ -172,6 +176,7 @@ export default function Dashboard() {
   const [overstapStep, setOverstapStep] = useState(1)
   const [overstapData, setOverstapData] = useState({ opzegDatum: '', nieuweNaam: '', nieuwePrijs: '', nieuweCyclus: 'maand' })
   const [progTableExpanded, setProgTableExpanded] = useState(false)
+  const [renewFilter, setRenewFilter] = useState(0) // 0=alle, 7=week, 30=maand
   // AI upload
   const [aiOpen, setAiOpen] = useState(false)
   const [aiSub, setAiSub] = useState<any>(null)
@@ -405,15 +410,31 @@ export default function Dashboard() {
             </div>
           )}
 
-          <div className="section-lbl">Mijn abonnementen</div>
+          {/* Notif banner — persistent */}
+          {(()=>{const soon=activeSubs.filter(s=>{const d=daysUntil(s.renew_date);return d!==null&&d>=0&&d<=7});return soon.length>0&&(
+            <div style={{padding:'10px 14px',background:'var(--amber-bg)',border:'1px solid #F5D89A',borderRadius:'var(--radius-sm)',marginBottom:12,fontSize:13,color:'var(--amber)',display:'flex',gap:8,alignItems:'flex-start'}}>
+              <span>🔔</span>
+              <span><strong>Binnenkort te verlengen:</strong> {soon.map(s=>{const d=daysUntil(s.renew_date);return `${s.name} (${d===0?'vandaag':d===1?'morgen':'over '+d+'d'})`}).join(' · ')}</span>
+            </div>
+          )})()}
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10,gap:8,flexWrap:'wrap'}}>
+            <div className="section-lbl" style={{marginBottom:0}}>Mijn abonnementen</div>
+            <select value={renewFilter} onChange={e=>setRenewFilter(parseInt(e.target.value))} style={{fontSize:12,padding:'4px 8px',border:'1px solid var(--border)',borderRadius:'var(--radius-xs)',background:'var(--surface)',color:'var(--muted)'}}>
+              <option value={0}>Alle abonnementen</option>
+              <option value={7}>Verlengt binnen 7 dagen</option>
+              <option value={30}>Verlengt binnen 30 dagen</option>
+            </select>
+          </div>
           <div className="sub-list">
-            {subs.map(s => {
+            {subs.filter(s=>renewFilter===0||((daysUntil(s.renew_date)??999)<=renewFilter&&(daysUntil(s.renew_date)??-1)>=0)).map(s => {
               const isExpanded = expandedIds.has(s.id)
               const days = daysUntil(s.renew_date)
               const monthly = effectiveMonthlyEUR(s)
+              const expiringStyle = s.status==='actief'&&days!==null&&days<=7 ? {borderColor:'#F5D89A',background:'linear-gradient(90deg,#FFFBF0 0%,var(--surface) 100%)'} : {}
               return (
                 <div key={s.id}>
                   <div className={`sub-row-collapsed${s.status==='opgezegd'?' cancelled':''}${isExpanded?' expanded':''}`}
+                    style={expiringStyle}
                     onClick={() => setExpandedIds(prev => { const n=new Set(prev); n.has(s.id)?n.delete(s.id):n.add(s.id); return n })}>
                     <div className="sub-row-logo">
                       {s.domain ? <img src={logoUrl(s.domain)} width={24} height={24} style={{borderRadius:6}} onError={e=>(e.target as any).style.display='none'} alt="" /> : <span style={{fontSize:18}}>{CATS[s.cat]?.icon||'📌'}</span>}
@@ -591,13 +612,20 @@ export default function Dashboard() {
             <div className="total-card"><div className="lbl">Per jaar</div><div className="val">{fmt(totalMonthly*12)}</div></div>
             {savedMonthly>0.01&&<div className="total-card"><div className="lbl">Bespaard</div><div className="val" style={{color:'var(--green)'}}>{fmt(savedMonthly)}/mnd</div></div>}
           </div>
-          {activeSubs.filter(s=>s.cat==='Streaming').length>=3&&(
+          {activeSubs.filter(s=>s.status==='actief'&&s.cat==='Streaming').length>=2&&(
             <div style={{padding:'14px 16px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',marginBottom:8,display:'flex',gap:12}}>
               <div style={{fontSize:18}}>⚠</div>
               <div><div style={{fontWeight:500,fontSize:13,marginBottom:4}}>{activeSubs.filter(s=>s.cat==='Streaming').length} streamingdiensten</div>
               <div style={{fontSize:12,color:'var(--muted)'}}>{activeSubs.filter(s=>s.cat==='Streaming').map(s=>s.name).join(', ')} — mogelijk overlap.</div></div>
             </div>
           )}
+          {(()=>{const introSubs=activeSubs.filter(s=>s.intro_price&&s.intro_until&&(daysUntil(s.intro_until)??-1)>=0&&(daysUntil(s.intro_until)??999)<=90);return introSubs.length>0&&(
+            <div style={{padding:'14px 16px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',marginBottom:8,display:'flex',gap:12}}>
+              <div style={{fontSize:18}}>⚠</div>
+              <div><div style={{fontWeight:500,fontSize:13,marginBottom:4}}>{introSubs.length} introductieprijs loopt binnen 90 dagen af</div>
+              <div style={{fontSize:12,color:'var(--muted)'}}>{introSubs.map(s=>`${s.name}: nog ${daysUntil(s.intro_until)}d, daarna ${fmt(parseFloat(s.price))}/${s.cycle}`).join(' · ')}</div></div>
+            </div>
+          )})()}
           {activeSubs.filter(s=>{const d=daysUntil(s.renew_date);return d!==null&&d>=0&&d<=14}).length>0&&(
             <div style={{padding:'14px 16px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',marginBottom:8,display:'flex',gap:12}}>
               <div style={{fontSize:18}}>⏰</div>
@@ -651,9 +679,15 @@ export default function Dashboard() {
               <div style={{position:'relative',height:240,marginTop:12}}>
                 <LineChart months={months} />
               </div>
-              <div style={{fontSize:11,color:'var(--muted)',marginTop:8,fontFamily:'monospace'}}>
-                Nu {fmt(flatNow)}/mnd · maand 36: {fmt(flatEnd)}/mnd · verschil: {delta>=0?'+':''}{fmt(delta)}/mnd
-              </div>
+
+            </div>
+            <div style={{display:'flex',gap:10,flexWrap:'wrap',marginTop:10,marginBottom:4}}>
+              <span style={{display:'flex',alignItems:'center',gap:4,fontSize:11,color:'var(--muted)'}}><span style={{width:10,height:3,background:'#378ADD',display:'inline-block',borderRadius:2}}/>Stabiel</span>
+              <span style={{display:'flex',alignItems:'center',gap:4,fontSize:11,color:'var(--muted)'}}><span style={{width:10,height:3,background:'#D85A30',display:'inline-block',borderRadius:2}}/>Stijging</span>
+              <span style={{display:'flex',alignItems:'center',gap:4,fontSize:11,color:'var(--muted)'}}><span style={{width:10,height:3,background:'#1D9E75',display:'inline-block',borderRadius:2}}/>Daling</span>
+            </div>
+            <div style={{fontSize:11.5,color:'var(--muted)',marginBottom:16,lineHeight:1.6}}>
+              💡 <strong>Dalingen in de grafiek</strong> ontstaan doordat jaarlijkse abonnementen in één maand doorlopen tot de volgende verlengdatum — daarna valt de kost terug. Dit is correct.
             </div>
             <div style={{marginBottom:20}}>
               <div className="section-lbl">Geplande prijswijzigingen</div>
