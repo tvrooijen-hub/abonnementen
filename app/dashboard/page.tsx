@@ -26,7 +26,7 @@ function buildPrognoseData(subs: any[]) {
     const yr = d.getFullYear(), mo = d.getMonth()
     const activeSubs = subs.filter(s => {
       if (s.status !== 'actief') return false
-      if (s.renew_date && new Date(s.renew_date) < d) return false
+      // Only exclude if opgezegd — renew_date passing doesn't mean cancelled
       return true
     })
     const total = activeSubs.reduce((t: number, s: any) => t + effectiveMonthlyEURForDate(s, d), 0)
@@ -114,8 +114,13 @@ function LineChart({ months }: { months: any[] }) {
     const values = months.map(m => m.total)
     const rawMin = Math.min(...values)
     const rawMax = Math.max(...values)
-    const minV = Math.max(0, Math.floor(rawMin * 0.85 / 50) * 50)
-    const maxV = (Math.ceil(rawMax * 1.08 / 50) * 50) || 100
+    // Nice step: pick a human-friendly interval
+    const range = rawMax - rawMin || rawMax || 100
+    const roughStep = range / 5
+    const magnitude = Math.pow(10, Math.floor(Math.log10(roughStep)))
+    const niceStep = [1, 2, 2.5, 5, 10].map(f => f * magnitude).find(s => s >= roughStep) || magnitude * 10
+    const minV = Math.max(0, Math.floor(rawMin / niceStep) * niceStep)
+    const maxV = Math.ceil(rawMax / niceStep) * niceStep || 100
     const xOf = (i: number) => pad.left + (i / (months.length - 1)) * cw
     const yOf = (v: number) => pad.top + ch - ((v - minV) / (maxV - minV)) * ch
     // Grid
@@ -376,7 +381,7 @@ export default function Dashboard() {
     <div className="app-container">
       <nav className="nav">
         <div className="nav-tabs">
-          {[['beheer','Abonnementen'],['overzicht','Overzicht'],['inzichten','Inzichten'],['prognose','Prognose'],['delen','Delen']].map(([p,l]) => (
+          {[['beheer','📋 Abonnementen'],['overzicht','📊 Overzicht'],['inzichten','💡 Inzichten'],['prognose','📈 Prognose'],['delen','👨‍👩‍👦 Delen']].map(([p,l]) => (
             <button key={p} className={`tab${panel===p?' active':''}`} onClick={() => setPanel(p)}>{l}</button>
           ))}
           <button className="logout-btn" onClick={handleLogout} style={{marginLeft:'auto',alignSelf:'center'}}>Uitloggen</button>
@@ -390,12 +395,7 @@ export default function Dashboard() {
           <div className="totals">
             <div className="total-card"><div className="lbl">Per maand</div><div className="val">{fmt(totalMonthly)}</div></div>
             <div className="total-card"><div className="lbl">Per jaar</div><div className="val">{fmt(totalMonthly*12)}</div></div>
-            {savedMonthly > 0.01 && <div className="total-card"><div className="lbl">Bespaard</div><div className="val" style={{color:'var(--green)'}}>{fmt(savedMonthly)}/mnd</div></div>}
-          </div>
-
-          <div style={{display:'flex',gap:8,marginBottom:14,flexWrap:'wrap'}}>
-            <button className="export-btn" onClick={exportCSV}>📄 Export CSV</button>
-            <button className="export-btn" onClick={()=>openAi(null)}>🤖 AI Contract scannen</button>
+            {savedMonthly > 0.01 && <div className="total-card"><div className="lbl">Bespaard / jaar</div><div className="val" style={{color:'var(--green)'}}>{fmt(savedMonthly*12)}</div></div>}
           </div>
 
           <div className="cat-pills">
@@ -447,9 +447,12 @@ export default function Dashboard() {
                     <div className="sub-row-meta">
                       <span className="sub-row-price">{fmt(monthly)}/mnd</span>
                       <span className="sub-row-cycle">{s.cycle}</span>
-                      {s.status==='opgezegd' ? <span className="badge badge-cancelled">Opgezegd</span>
+                      {s.status==='opgezegd'
+                        ? <span className="badge badge-cancelled">{s.end_date&&daysUntil(s.end_date)!==null&&(daysUntil(s.end_date)??-1)>=0?`Eindigt over ${daysUntil(s.end_date)}d`:'Opgezegd'}</span>
                         : days!==null&&days<=7 ? <span className="badge badge-soon">over {days}d</span>
-                        : days!==null&&days<=30 ? <span className="badge badge-ok">over {days}d</span> : null}
+                        : days!==null&&days<=30 ? <span className="badge badge-ok">over {days}d</span>
+                        : s.cycle==='jaar' ? <span className="badge" style={{background:'#EEF2FF',color:'#6366F1'}}>Jaarcontract</span>
+                        : null}
                     </div>
                     <span className={`expand-chevron${isExpanded?' open':''}`}>▶</span>
                     <button className="sub-del-sm" onClick={e=>{e.stopPropagation();deleteSub(s.id)}}>✕</button>
@@ -476,6 +479,11 @@ export default function Dashboard() {
                           <div className="field-label">Verlengdatum</div>
                           <input className="field-input" type="date" defaultValue={s.renew_date||''} onBlur={e=>updateField(s,{renew_date:e.target.value||null})} />
                         </div>
+                        {s.status==='opgezegd'&&<div className="field-group">
+                          <div className="field-label">Einddatum contract</div>
+                          <input className="field-input" type="date" defaultValue={s.end_date||''} onBlur={e=>updateField(s,{end_date:e.target.value||null})} placeholder="Optioneel" />
+                          {s.end_date&&daysUntil(s.end_date)!==null&&daysUntil(s.end_date)!>=0&&<div style={{fontSize:11,color:'var(--muted)',marginTop:3}}>Eindigt {daysUntil(s.end_date)===0?'vandaag':daysUntil(s.end_date)===1?'morgen':`over ${daysUntil(s.end_date)} dagen`}</div>}
+                        </div>}
                         <div className="field-group">
                           <div className="field-label">Betaling</div>
                           <select className="field-input" defaultValue={s.payment_method} onChange={e=>updateField(s,{payment_method:e.target.value})}>
@@ -554,6 +562,25 @@ export default function Dashboard() {
               )
             })}
           </div>
+          {/* Acties met impact */}
+          {(()=>{
+            const kansen: {label:string,saving:number}[] = []
+            activeSubs.filter(s=>s.cycle==='maand'&&effectiveMonthlyEUR(s)>5).forEach(s=>{
+              const jaarVariant = effectiveMonthlyEUR(s)*12*0.85 // schatting: 15% goedkoper jaarlijks
+              kansen.push({label:`${s.name} jaarlijks betalen`,saving:(effectiveMonthlyEUR(s)*12-jaarVariant)})
+            })
+            const streamingSubs=activeSubs.filter(s=>s.cat==='Streaming')
+            if(streamingSubs.length>=2) kansen.push({label:`Streaming samenvoegen (${streamingSubs.map(s=>s.name).join(', ')})`,saving:streamingSubs.slice(1).reduce((t,s)=>t+effectiveMonthlyEUR(s)*12,0)})
+            const topKansen=kansen.sort((a,b)=>b.saving-a.saving).slice(0,3)
+            if(!topKansen.length) return null
+            return <div style={{marginBottom:16,padding:'14px 16px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)'}}>
+              <div style={{fontWeight:500,fontSize:13,marginBottom:10}}>💡 Mogelijke besparingen</div>
+              {topKansen.map((k,i)=><div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',fontSize:12,paddingBottom:8,marginBottom:8,borderBottom:i<topKansen.length-1?'1px solid var(--border)':'none'}}>
+                <span style={{color:'var(--muted)',flex:1,paddingRight:8}}>{k.label}</span>
+                <span style={{fontWeight:600,color:'var(--green)',whiteSpace:'nowrap'}}>{fmt(k.saving)}/jr</span>
+              </div>)}
+            </div>
+          })()}
           <button className="add-btn" onClick={()=>{setAddForm({name:'',price:'',cycle:'maand',renew_date:'',payment_method:'',cat:'',domain:''});setAddOpen(true)}}>+ Abonnement toevoegen</button>
         </>}
 
@@ -572,7 +599,7 @@ export default function Dashboard() {
             {/* Donut */}
             <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:16,boxShadow:'var(--shadow)'}}>
               <div style={{fontSize:13,fontWeight:500,marginBottom:2}}>Per categorie</div>
-              <div style={{fontSize:12,color:'var(--muted)',marginBottom:14}}>{fmt(totalMonthly)} per maand</div>
+              <div style={{fontSize:12,color:'var(--muted)',marginBottom:14}}>{fmt(catBreakdown.reduce((t,c)=>t+c.total,0))} per maand</div>
               <DonutChart data={catBreakdown.map(c=>({label:c.cat,value:c.total}))} colors={COLORS} />
               <div style={{display:'flex',flexWrap:'wrap',gap:'6px 12px',marginTop:12}}>
                 {catBreakdown.map((c,i)=>(
@@ -614,7 +641,7 @@ export default function Dashboard() {
           <div className="totals">
             <div className="total-card"><div className="lbl">Per maand</div><div className="val">{fmt(totalMonthly)}</div></div>
             <div className="total-card"><div className="lbl">Per jaar</div><div className="val">{fmt(totalMonthly*12)}</div></div>
-            {savedMonthly>0.01&&<div className="total-card"><div className="lbl">Bespaard</div><div className="val" style={{color:'var(--green)'}}>{fmt(savedMonthly)}/mnd</div></div>}
+            {savedMonthly>0.01&&<div className="total-card"><div className="lbl">Bespaard / jaar</div><div className="val" style={{color:'var(--green)'}}>{fmt(savedMonthly*12)}</div></div>}
           </div>
           {activeSubs.filter(s=>s.status==='actief'&&s.cat==='Streaming').length>=2&&(
             <div style={{padding:'14px 16px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',marginBottom:8,display:'flex',gap:12}}>
@@ -640,8 +667,8 @@ export default function Dashboard() {
           {savedMonthly>0.01&&(
             <div style={{padding:'14px 16px',background:'var(--green-bg)',border:'1px solid #b5d97a',borderRadius:'var(--radius-sm)',marginBottom:8,display:'flex',gap:12}}>
               <div style={{fontSize:18}}>✓</div>
-              <div><div style={{fontWeight:500,fontSize:13,marginBottom:4}}>Bespaard: {fmt(savedMonthly)}/mnd · {fmt(savedMonthly*12)}/jaar</div>
-              <div style={{fontSize:12,color:'var(--green)'}}>Door opzeggen of overstappen.</div></div>
+              <div><div style={{fontWeight:500,fontSize:13,marginBottom:4}}>Bespaard: {fmt(savedMonthly*12)}/jaar · {fmt(savedMonthly)}/mnd</div>
+              <div style={{fontSize:12,color:'var(--green)'}}>Netto besparing t.o.v. wat je daarvoor betaalde.</div></div>
             </div>
           )}
           <div style={{padding:'14px 16px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',marginBottom:8,display:'flex',gap:12}}>
@@ -649,6 +676,56 @@ export default function Dashboard() {
             <div><div style={{fontWeight:500,fontSize:13,marginBottom:4}}>Totaal: {fmt(totalMonthly*12)}/jaar</div>
             <div style={{fontSize:12,color:'var(--muted)'}}>{fmt(totalMonthly)}/mnd · {totalMonthly<180?'Onder':'Boven'} het NL gemiddelde van €\u00a0180/mnd.</div></div>
           </div>
+          {/* Timeline komende verlengingen */}
+          {(()=>{
+            const upcoming = activeSubs
+              .filter(s=>daysUntil(s.renew_date)!==null&&(daysUntil(s.renew_date)??-1)>=0&&(daysUntil(s.renew_date)??999)<=60)
+              .sort((a,b)=>(daysUntil(a.renew_date)??999)-(daysUntil(b.renew_date)??999))
+            if(!upcoming.length) return null
+            return <div style={{padding:'14px 16px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',marginBottom:8}}>
+              <div style={{fontWeight:500,fontSize:13,marginBottom:10}}>📅 Aankomende verlengingen</div>
+              {upcoming.map(s=>{
+                const d=daysUntil(s.renew_date)??0
+                const dateStr=new Date(s.renew_date!).toLocaleDateString('nl-NL',{day:'numeric',month:'long'})
+                return <div key={s.id} style={{display:'flex',alignItems:'center',gap:10,paddingBottom:8,marginBottom:8,borderBottom:'1px solid var(--border)'}}>
+                  <div style={{width:36,textAlign:'center',flexShrink:0}}>
+                    <div style={{fontSize:11,fontWeight:600,color:d<=7?'var(--red)':'var(--amber)'}}>{d===0?'vandaag':d===1?'morgen':`${d}d`}</div>
+                  </div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:13,fontWeight:500}}>{s.name}</div>
+                    <div style={{fontSize:11,color:'var(--muted)'}}>{dateStr} · {fmt(effectiveMonthlyEUR(s))}/mnd</div>
+                  </div>
+                  <div style={{fontSize:12,fontFamily:'monospace',color:'var(--muted)',textAlign:'right'}}>
+                    {s.cycle==='jaar'&&<div style={{color:'var(--red)',fontWeight:500}}>{fmt(effectiveMonthlyEUR(s)*12)}/jr</div>}
+                  </div>
+                </div>
+              })}
+            </div>
+          })()}
+
+          {/* Acties met impact */}
+          {(()=>{
+            const jaarSubs = activeSubs.filter(s=>s.cycle==='jaar')
+            if(!jaarSubs.length) return null
+            return <div style={{padding:'14px 16px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',marginBottom:8}}>
+              <div style={{fontWeight:500,fontSize:13,marginBottom:2}}>💰 Verborgen jaarbetalingen</div>
+              <div style={{fontSize:12,color:'var(--muted)',marginBottom:10}}>Je hebt {fmt(jaarSubs.reduce((t,s)=>t+effectiveMonthlyEUR(s)*12,0))} aan jaarlijkse abonnementen die niet maandelijks zichtbaar zijn.</div>
+              {jaarSubs.map(s=><div key={s.id} style={{display:'flex',justifyContent:'space-between',fontSize:12,paddingBottom:4,marginBottom:4,borderBottom:'1px solid var(--border)'}}>
+                <span>{s.name}</span>
+                <span style={{fontFamily:'monospace',color:'var(--muted)'}}>{fmt(effectiveMonthlyEUR(s)*12)}/jr</span>
+              </div>)}
+            </div>
+          })()}
+
+          {/* Rekenspecificatie */}
+          <div style={{padding:'14px 16px',background:'var(--bg)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',marginBottom:8,fontSize:12,color:'var(--muted)',lineHeight:1.7}}>
+            <div style={{fontWeight:500,color:'var(--text)',marginBottom:6}}>🔢 Hoe is dit bedrag berekend?</div>
+            <div>Gebaseerd op <strong>{activeSubs.length} actieve abonnementen</strong></div>
+            <div>Maandabonnementen: {activeSubs.filter(s=>s.cycle==='maand').length} · Kwartaal: {activeSubs.filter(s=>s.cycle==='kwartaal').length} · Jaar (÷12): {activeSubs.filter(s=>s.cycle==='jaar').length}</div>
+            <div>USD abonnementen worden omgerekend tegen {(1/EUR_PER_USD).toFixed(2)} $/€</div>
+            <div style={{marginTop:4,paddingTop:4,borderTop:'1px solid var(--border)'}}>Totaal: {fmt(totalMonthly)}/mnd · {fmt(totalMonthly*12)}/jaar</div>
+          </div>
+
           {activeSubs.length===0&&<div style={{fontSize:13,color:'var(--muted)',padding:'20px 0'}}>Voeg abonnementen toe voor inzichten.</div>}
         </>}
 
@@ -829,9 +906,12 @@ export default function Dashboard() {
                 </div>
               </div>
             </div>
-            <div className="add-modal-footer">
-              <button className="add-secondary-btn" onClick={()=>setAddOpen(false)}>Annuleren</button>
-              <button className="add-primary-btn" onClick={()=>addSub({...addForm,price:parseFloat(addForm.price)||0,price_currency:'€',renew_date:addForm.renew_date||null,status:'actief',kenmerken:defaultKenmerken(addForm.cat)})}>Toevoegen</button>
+            <div className="add-modal-footer" style={{display:'flex',gap:8,justifyContent:'space-between',flexWrap:'wrap'}}>
+              <button className="add-secondary-btn" onClick={()=>{setAddOpen(false);openAi(null)}} style={{background:'var(--bg)',color:'var(--muted)',border:'1px solid var(--border)'}}>🤖 Contract scannen</button>
+              <div style={{display:'flex',gap:8}}>
+                <button className="add-secondary-btn" onClick={()=>setAddOpen(false)}>Annuleren</button>
+                <button className="add-primary-btn" onClick={()=>addSub({...addForm,price:parseFloat(addForm.price)||0,price_currency:'€',renew_date:addForm.renew_date||null,status:'actief',kenmerken:defaultKenmerken(addForm.cat)})}>Toevoegen</button>
+              </div>
             </div>
           </div>
         </div>
