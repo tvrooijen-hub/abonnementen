@@ -230,11 +230,15 @@ export default function Dashboard() {
       )
     }
     if (price_history !== undefined) {
+      // Keep all rows in local state immediately (incl. blank new rows)
+      setSubs(prev => prev.map(s => s.id === sub.id ? { ...s, price_history } : s))
+      // Only persist rows that have both date and price filled in
       await sb.from('price_history').delete().eq('subscription_id', sub.id)
       const valid = price_history.filter((ph: any) => ph.valid_from && ph.price)
       if (valid.length) await sb.from('price_history').insert(
         valid.map((ph: any) => ({ subscription_id: sub.id, user_id: sub.user_id, price: ph.price, valid_from: ph.valid_from, note: ph.note || null }))
       )
+      return
     }
     fetchSubs()
   }
@@ -651,7 +655,7 @@ export default function Dashboard() {
         {/* ══════════════ PROGNOSE ══════════════ */}
         {panel === 'prognose' && (()=>{
           const months = prognoseMonths
-          const flatNow = months[0]?.total||0, flatEnd = months[35]?.total||0
+          const flatNow = months[0]?.total||0, flatEnd = months[23]?.total||0
           const delta = flatEnd-flatNow
           const peakM = months.reduce((b,m)=>m.total>b.total?m:b, months[0]||{total:0,label:''})
           const changeEvents = months.flatMap((m,mi)=>m.events
@@ -666,14 +670,14 @@ export default function Dashboard() {
           return <>
             <div className="totals">
               <div className="total-card"><div className="lbl">Nu / maand</div><div className="val">{fmt(flatNow)}</div></div>
-              <div className="total-card"><div className="lbl">Over 36 maanden</div><div className="val" style={{color:delta>0.5?'var(--red)':delta<-0.5?'var(--green)':'inherit'}}>{fmt(flatEnd)}</div></div>
+              <div className="total-card"><div className="lbl">Over 24 maanden</div><div className="val" style={{color:delta>0.5?'var(--red)':delta<-0.5?'var(--green)':'inherit'}}>{fmt(flatEnd)}</div></div>
               <div className="total-card"><div className="lbl">Piek · {peakM.label}</div><div className="val">{fmt(peakM.total)}</div></div>
             </div>
             <div className="prog-chart-card">
               <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',flexWrap:'wrap',gap:8,marginBottom:4}}>
                 <div>
                   <div style={{fontSize:13,fontWeight:500,marginBottom:2}}>Geprognosticeerde maandkosten</div>
-                  <div style={{fontSize:12,color:'var(--muted)'}}>komende 36 maanden · gebaseerd op ingevoerde prijswijzigingen</div>
+                  <div style={{fontSize:12,color:'var(--muted)'}}>komende 24 maanden · gebaseerd op ingevoerde prijswijzigingen</div>
                 </div>
               </div>
               <div style={{position:'relative',height:240,marginTop:12}}>
