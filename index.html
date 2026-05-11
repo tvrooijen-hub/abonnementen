@@ -1,0 +1,915 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Abonnementen</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  :root {
+    --bg: #0F0F13;
+    --surface: #1C1C22;
+    --border: #2C2C35;
+    --text: #F0F0F5;
+    --muted: #8A8A9A;
+    --blue: #4F8EF7;
+    --green: #7DC96E;
+    --green-bg: #1A2E1A;
+    --orange: #F5A623;
+    --red: #E5534B;
+    --radius: 12px;
+    --radius-sm: 8px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; min-height: 100vh; }
+
+  #login-screen { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
+  .login-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 32px 28px; width: 100%; max-width: 380px; }
+  .login-title { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+  .login-sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .login-input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; color: var(--text); font-size: 14px; outline: none; }
+  .login-input:focus { border-color: var(--blue); }
+  .login-btn { width: 100%; margin-top: 12px; background: var(--blue); color: #fff; border: none; border-radius: var(--radius-sm); padding: 11px; font-size: 14px; font-weight: 500; cursor: pointer; }
+  .login-btn:hover { opacity: 0.9; }
+  .login-msg { margin-top: 12px; font-size: 13px; color: var(--green); text-align: center; }
+  .login-err { color: var(--red); }
+
+  #app-screen { display: none; max-width: 600px; margin: 0 auto; padding: 0 0 80px; }
+
+  .nav { position: sticky; top: 0; z-index: 10; background: var(--bg); border-bottom: 1px solid var(--border); padding: 0 16px; }
+  .nav-tabs { display: flex; gap: 4px; height: 48px; align-items: center; }
+  .tab { background: none; border: none; color: var(--muted); font-size: 13px; font-weight: 500; padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+  .tab.active { color: var(--text); background: var(--surface); }
+  .logout-btn { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 6px 8px; }
+  .logout-btn:hover { color: var(--text); }
+
+  .panel { padding: 16px; }
+
+  .totals { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
+  .total-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px 14px; }
+  .total-card .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
+  .total-card .val { font-size: 20px; font-weight: 600; font-family: monospace; }
+
+  .cat-pills { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 12px; scrollbar-width: none; }
+  .cat-pills::-webkit-scrollbar { display: none; }
+  .cat-pill { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 5px 12px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+  .cat-pill.active { border-color: var(--blue); color: var(--blue); }
+
+  .suggestions-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .suggestion-chip { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .suggestion-chip.active { border-color: var(--green); color: var(--green); cursor: default; }
+  .suggestion-chip:not(.active):hover { border-color: var(--blue); color: var(--blue); }
+
+  .section-lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px; }
+
+  .sub-list { display: flex; flex-direction: column; gap: 4px; }
+  .sub-row { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); display: flex; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer; user-select: none; }
+  .sub-row.cancelled { opacity: 0.5; }
+  .sub-row.expanded { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom-color: transparent; }
+  .sub-row-logo { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .sub-row-logo img { width: 24px; height: 24px; border-radius: 6px; }
+  .sub-row-name { flex: 1; font-weight: 500; font-size: 13px; }
+  .sub-row-meta { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .sub-row-price { font-family: monospace; font-size: 13px; font-weight: 500; }
+  .badge { font-size: 10px; padding: 2px 7px; border-radius: 10px; font-weight: 500; }
+  .badge-soon { background: #3D1F0A; color: var(--orange); }
+  .badge-ok { background: #1A2A1A; color: var(--green); }
+  .badge-cancelled { background: #2A1A1A; color: var(--red); }
+  .chevron { color: var(--muted); font-size: 10px; transition: transform .2s; flex-shrink: 0; }
+  .chevron.open { transform: rotate(90deg); }
+  .del-btn { background: none; border: none; color: var(--muted); font-size: 14px; cursor: pointer; padding: 2px 6px; flex-shrink: 0; }
+  .del-btn:hover { color: var(--red); }
+
+  .sub-detail { background: var(--surface); border: 1px solid var(--border); border-top: none; border-bottom-left-radius: var(--radius-sm); border-bottom-right-radius: var(--radius-sm); padding: 14px; }
+  .sub-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+  .field-group { display: flex; flex-direction: column; gap: 4px; }
+  .field-group.full { grid-column: 1 / -1; }
+  .field-label { font-size: 11px; color: var(--muted); }
+  .field-input { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; color: var(--text); font-size: 13px; width: 100%; outline: none; }
+  .field-input:focus { border-color: var(--blue); }
+
+  .status-trio { display: flex; gap: 6px; }
+  .status-btn { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 4px; font-size: 11px; color: var(--muted); cursor: pointer; text-align: center; }
+  .status-btn.green { border-color: var(--green); color: var(--green); }
+  .status-btn.red { border-color: var(--red); color: var(--red); }
+
+  .accordion-section { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 10px; }
+  .accordion-trigger { width: 100%; background: none; border: none; color: var(--text); display: flex; justify-content: space-between; align-items: center; cursor: pointer; padding: 2px 0; font-size: 13px; }
+  .accordion-badge { font-size: 10px; padding: 2px 7px; border-radius: 10px; background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
+  .accordion-badge.filled { background: #1A2A3A; color: var(--blue); border-color: var(--blue); }
+  .accordion-chevron { color: var(--muted); font-size: 10px; margin-left: 6px; transition: transform .2s; display: inline-block; }
+  .accordion-chevron.open { transform: rotate(90deg); }
+  .accordion-body { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .kenmerk-row { display: flex; gap: 6px; }
+  .kenmerk-key { flex: 2; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; color: var(--text); font-size: 12px; outline: none; }
+  .kenmerk-val { flex: 3; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; color: var(--text); font-size: 12px; outline: none; }
+  .kenmerk-del { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 4px; }
+  .kenmerk-add-btn { background: none; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font-size: 12px; padding: 6px; cursor: pointer; text-align: center; }
+  .prijshist-row { display: flex; gap: 6px; align-items: center; }
+  .prijshist-input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; color: var(--text); font-size: 12px; outline: none; min-width: 0; }
+  .prijshist-note { flex: 2; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; color: var(--text); font-size: 12px; outline: none; min-width: 0; }
+  .prijshist-del { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 4px; flex-shrink: 0; }
+  .prijshist-add { background: none; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font-size: 12px; padding: 6px; cursor: pointer; text-align: center; width: 100%; }
+  .prijshist-current { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+
+  .add-btn { width: 100%; margin-top: 12px; background: none; border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 11px; color: var(--muted); font-size: 13px; cursor: pointer; }
+  .add-btn:hover { border-color: var(--blue); color: var(--blue); }
+
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: flex; align-items: flex-end; justify-content: center; z-index: 100; padding: 16px; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); width: 100%; max-width: 480px; max-height: 90vh; overflow-y: auto; }
+  .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 16px 0; }
+  .modal-title { font-weight: 600; font-size: 15px; }
+  .modal-close { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; }
+  .modal-body { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .modal-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .modal-field { display: flex; flex-direction: column; gap: 4px; }
+  .modal-label { font-size: 11px; color: var(--muted); }
+  .modal-input { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px; color: var(--text); font-size: 13px; outline: none; width: 100%; }
+  .modal-input:focus { border-color: var(--blue); }
+  .modal-footer { display: flex; gap: 8px; padding: 0 16px 16px; }
+  .btn-secondary { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; color: var(--muted); font-size: 13px; cursor: pointer; }
+  .btn-primary { flex: 2; background: var(--blue); border: none; border-radius: 6px; padding: 10px; color: #fff; font-size: 13px; font-weight: 500; cursor: pointer; }
+
+  .cat-row { display: flex; justify-content: space-between; padding: 10px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 6px; font-size: 13px; }
+
+  .overstap-netto { padding: 10px 12px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; background: var(--green-bg); color: var(--green); border: 1px solid #3a6a3a; }
+  .overstap-netto.cost { background: #2A1A1A; color: var(--red); border-color: #6a3a3a; }
+  .dots { display: flex; justify-content: center; gap: 5px; margin-bottom: 16px; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border); }
+  .dot.active { background: var(--blue); }
+
+  /* PROGNOSE */
+  .prognose-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px; margin-top: 16px; }
+  .prognose-title { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 12px; }
+  .prognose-chart { position: relative; height: 180px; }
+
+  #loading { display: flex; align-items: center; justify-content: center; height: 100vh; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div id="loading">Laden…</div>
+
+<div id="login-screen" style="display:none">
+  <div class="login-card">
+    <div class="login-title">Abonnementen</div>
+    <div class="login-sub">Voer je e-mailadres in om een inloglink te ontvangen.</div>
+    <input class="login-input" type="email" id="login-email" placeholder="jouw@email.nl" />
+    <button class="login-btn" onclick="sendMagicLink()">Stuur inloglink</button>
+    <div id="login-msg" class="login-msg"></div>
+  </div>
+</div>
+
+<div id="app-screen" style="display:none">
+  <nav class="nav">
+    <div class="nav-tabs">
+      <button class="tab active" onclick="setPanel('beheer')">Abonnementen</button>
+      <button class="tab" onclick="setPanel('overzicht')">Overzicht</button>
+      <button class="tab" onclick="setPanel('inzichten')">Inzichten</button>
+      <button class="logout-btn" onclick="handleLogout()">Uitloggen</button>
+    </div>
+  </nav>
+  <div class="panel" id="panel-content"></div>
+</div>
+
+<div id="modal-overlay" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeModal()">
+  <div class="modal" id="modal-box"></div>
+</div>
+
+<script>
+const SUPABASE_URL = 'https://chefqbjxoivnrpvvzvbn.supabase.co'
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNoZWZxYmp4b2l2bnJwdnZ6dmJuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY2Mjk0NTQsImV4cCI6MjA5MjIwNTQ1NH0.Hj6Kyr1bXJJhzi_HBGf8APK2B400WvVFTcz6Yfn6p3s'
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY)
+
+const PAYMENT_METHODS = ['Persoonlijke rekening','Gezamenlijke rekening','Rekening vrouw','Creditcard','Anders']
+
+const CATS = {
+  'Streaming': { icon: '🎬', items: [
+    {name:'Netflix',price:17.99,cycle:'maand',domain:'netflix.com'},
+    {name:'Videoland',price:7.99,cycle:'maand',domain:'videoland.com'},
+    {name:'Disney+',price:13.99,cycle:'maand',domain:'disneyplus.com'},
+    {name:'HBO Max',price:9.99,cycle:'maand',domain:'max.com'},
+    {name:'Amazon Prime',price:8.99,cycle:'maand',domain:'amazon.com'},
+    {name:'Apple TV+',price:9.99,cycle:'maand',domain:'apple.com'},
+    {name:'Spotify',price:10.99,cycle:'maand',domain:'spotify.com'},
+    {name:'Apple Music',price:10.99,cycle:'maand',domain:'apple.com'},
+    {name:'YouTube Premium',price:13.99,cycle:'maand',domain:'youtube.com'},
+  ]},
+  'AI': { icon: '🤖', items: [
+    {name:'ChatGPT Plus',price:22.99,cycle:'maand',domain:'openai.com'},
+    {name:'Claude Pro',price:18.00,cycle:'maand',domain:'anthropic.com'},
+    {name:'Copilot Pro',price:22.00,cycle:'maand',domain:'microsoft.com'},
+    {name:'Perplexity Pro',price:20.00,cycle:'maand',domain:'perplexity.ai'},
+    {name:'Gemini Advanced',price:21.99,cycle:'maand',domain:'google.com'},
+    {name:'Midjourney',price:10.00,cycle:'maand',domain:'midjourney.com'},
+  ]},
+  'Software': { icon: '💻', items: [
+    {name:'Microsoft 365',price:99.00,cycle:'jaar',domain:'microsoft.com'},
+    {name:'Adobe Creative',price:59.99,cycle:'maand',domain:'adobe.com'},
+    {name:'Notion',price:10.00,cycle:'maand',domain:'notion.so'},
+    {name:'Canva Pro',price:12.99,cycle:'maand',domain:'canva.com'},
+  ]},
+  'Cloud & Opslag': { icon: '☁️', items: [
+    {name:'iCloud+',price:0.99,cycle:'maand',domain:'apple.com'},
+    {name:'Google One',price:1.99,cycle:'maand',domain:'google.com'},
+    {name:'Dropbox',price:9.99,cycle:'maand',domain:'dropbox.com'},
+    {name:'OneDrive',price:2.00,cycle:'maand',domain:'microsoft.com'},
+  ]},
+  'Beveiliging': { icon: '🔒', items: [
+    {name:'1Password',price:3.99,cycle:'maand',domain:'1password.com'},
+    {name:'Bitwarden',price:1.00,cycle:'maand',domain:'bitwarden.com'},
+    {name:'NordVPN',price:3.99,cycle:'maand',domain:'nordvpn.com'},
+  ]},
+  'Mobiel & Internet': { icon: '📡', items: [
+    {name:'Ziggo Internet',price:45.00,cycle:'maand',domain:'ziggo.nl'},
+    {name:'KPN Internet',price:42.00,cycle:'maand',domain:'kpn.com'},
+    {name:'KPN Mobiel',price:25.00,cycle:'maand',domain:'kpn.com'},
+    {name:'Odido Mobiel',price:18.00,cycle:'maand',domain:'odido.nl'},
+    {name:'Youfone',price:11.50,cycle:'maand',domain:'youfone.nl'},
+    {name:'Ziggo TV',price:19.00,cycle:'maand',domain:'ziggo.nl'},
+    {name:'NPO Plus',price:5.99,cycle:'maand',domain:'npoplus.nl'},
+  ]},
+  'Energie': { icon: '⚡', items: [
+    {name:'Energie combi',price:170.00,cycle:'maand',domain:'vattenfall.nl'},
+    {name:'Water',price:25.00,cycle:'maand',domain:'waternet.nl'},
+  ]},
+  'Wonen': { icon: '🏠', items: [
+    {name:'Huur',price:900.00,cycle:'maand',domain:''},
+    {name:'VvE bijdrage',price:75.00,cycle:'maand',domain:''},
+    {name:'Inboedelverzekering',price:15.00,cycle:'maand',domain:'centraal-beheer.nl'},
+  ]},
+  'Verzekeringen': { icon: '🛡️', items: [
+    {name:'Zorgverzekering',price:135.00,cycle:'maand',domain:'menzis.nl'},
+    {name:'Autoverzekering',price:60.00,cycle:'maand',domain:'centraal-beheer.nl'},
+    {name:'Rechtsbijstand',price:16.00,cycle:'maand',domain:'arag.nl'},
+    {name:'OV-abonnement',price:40.00,cycle:'maand',domain:'ns.nl'},
+  ]},
+  'Nieuws & Kennis': { icon: '📰', items: [
+    {name:'NRC',price:17.50,cycle:'maand',domain:'nrc.nl'},
+    {name:'De Volkskrant',price:13.99,cycle:'maand',domain:'volkskrant.nl'},
+    {name:'Duolingo Plus',price:6.99,cycle:'maand',domain:'duolingo.com'},
+  ]},
+  'Games': { icon: '🎮', items: [
+    {name:'PlayStation Plus',price:8.99,cycle:'maand',domain:'playstation.com'},
+    {name:'Xbox Game Pass',price:14.99,cycle:'maand',domain:'xbox.com'},
+    {name:'Nintendo Online',price:19.99,cycle:'jaar',domain:'nintendo.com'},
+  ]},
+  'Sport & Fitness': { icon: '💪', items: [
+    {name:'Basic-Fit',price:25.99,cycle:'maand',domain:'basic-fit.com'},
+    {name:'Strava',price:6.99,cycle:'maand',domain:'strava.com'},
+  ]},
+  'Overig': { icon: '📌', items: [] },
+}
+
+const CAT_NAMES = Object.keys(CATS)
+const CAT_KENMERKEN = {
+  'Mobiel & Internet': ['Data','Bellen','SMS','Netwerk'],
+  'Verzekeringen': ['Dekking','Eigen risico','Type','Looptijd'],
+  'Streaming': ['Schermen','Kwaliteit','Offline'],
+  'Software': ['Gebruikers','Opslag','Platform'],
+  'Cloud & Opslag': ['Opslag','Apparaten'],
+  'Sport & Fitness': ['Type','Locaties'],
+  'Games': ['Platform','Online'],
+  'Nieuws & Kennis': ['Toegang','Archief'],
+  'Wonen': ['Type','Looptijd'],
+  'AI': ['Model','Berichten/mnd'],
+}
+
+const USD_RATE = 1.08
+let subs = []
+let currentPanel = 'beheer'
+let activeCat = CAT_NAMES[0]
+let expandedIds = new Set()
+let openAccordions = new Set()
+let prognoseChart = null
+
+function logoUrl(domain) {
+  if (!domain) return ''
+  return `https://www.google.com/s2/favicons?domain=${domain}&sz=64`
+}
+
+function toMonthly(price, cycle) {
+  const p = parseFloat(price) || 0
+  if (cycle === 'jaar') return p / 12
+  if (cycle === 'kwartaal') return p / 3
+  return p
+}
+
+function effectiveMonthlyEUR(s, atDate) {
+  const d = atDate || new Date()
+  const history = (s.price_history || [])
+    .filter(ph => ph.valid_from && new Date(ph.valid_from) <= d)
+    .sort((a, b) => b.valid_from.localeCompare(a.valid_from))
+  const price = history.length > 0 ? history[0].price : parseFloat(s.price) || 0
+  let monthly = price
+  if (s.price_currency === '$') monthly = monthly / USD_RATE
+  return toMonthly(monthly, s.cycle)
+}
+
+function daysUntil(dateStr) {
+  if (!dateStr) return null
+  const today = new Date(); today.setHours(0,0,0,0)
+  const d = new Date(dateStr); d.setHours(0,0,0,0)
+  return Math.round((d - today) / 86400000)
+}
+
+function fmt(n) { return '€\u00a0' + n.toFixed(2).replace('.', ',') }
+
+function defaultKenmerken(cat) {
+  return (CAT_KENMERKEN[cat] || []).map((k, i) => ({ key: k, value: '', sort_order: i }))
+}
+
+function esc(str) {
+  return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+}
+
+// ── AUTH ──
+async function sendMagicLink() {
+  const email = document.getElementById('login-email').value.trim()
+  const msg = document.getElementById('login-msg')
+  if (!email) { msg.textContent = 'Vul een e-mailadres in.'; msg.className = 'login-msg login-err'; return }
+  const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.href } })
+  if (error) { msg.textContent = error.message; msg.className = 'login-msg login-err' }
+  else { msg.textContent = 'Check je inbox voor de inloglink!'; msg.className = 'login-msg' }
+}
+
+async function handleLogout() {
+  await sb.auth.signOut()
+  document.getElementById('app-screen').style.display = 'none'
+  document.getElementById('login-screen').style.display = 'flex'
+}
+
+// ── DATA ──
+async function fetchSubs() {
+  const { data } = await sb.from('subscriptions')
+    .select('*, kenmerken(id, key, value, sort_order), price_history(id, price, valid_from, note)')
+    .order('created_at', { ascending: true })
+  subs = data || []
+  render()
+}
+
+// Update locally first, then persist — keeps accordions open
+function localUpdate(id, fields) {
+  const idx = subs.findIndex(s => s.id === id)
+  if (idx === -1) return
+  const { kenmerken, price_history, ...rest } = fields
+  subs[idx] = { ...subs[idx], ...rest }
+  if (kenmerken !== undefined) subs[idx].kenmerken = kenmerken
+  if (price_history !== undefined) subs[idx].price_history = price_history
+  render()
+  persistUpdate(subs[idx], fields)
+}
+
+async function persistUpdate(sub, fields) {
+  const { kenmerken, price_history, ...rest } = fields
+  if (Object.keys(rest).length) await sb.from('subscriptions').update(rest).eq('id', sub.id)
+  if (kenmerken !== undefined) {
+    await sb.from('kenmerken').delete().eq('subscription_id', sub.id)
+    if (kenmerken.length) await sb.from('kenmerken').insert(
+      kenmerken.map((k, i) => ({ subscription_id: sub.id, user_id: sub.user_id, key: k.key, value: k.value || '', sort_order: i }))
+    )
+  }
+  if (price_history !== undefined) {
+    await sb.from('price_history').delete().eq('subscription_id', sub.id)
+    if (price_history.length) await sb.from('price_history').insert(
+      price_history.map(ph => ({ subscription_id: sub.id, user_id: sub.user_id, price: ph.price, valid_from: ph.valid_from, note: ph.note || null }))
+    )
+  }
+}
+
+async function addSub(data) {
+  const { data: { user } } = await sb.auth.getUser()
+  const { kenmerken, ...rest } = data
+  const { data: sub } = await sb.from('subscriptions').insert({ ...rest, user_id: user.id }).select().single()
+  if (sub && kenmerken?.length) await sb.from('kenmerken').insert(
+    kenmerken.map((k, i) => ({ subscription_id: sub.id, user_id: user.id, key: k.key, value: k.value || '', sort_order: i }))
+  )
+  fetchSubs()
+}
+
+async function deleteSub(id) {
+  if (!confirm('Abonnement verwijderen?')) return
+  await sb.from('subscriptions').delete().eq('id', id)
+  expandedIds.delete(id)
+  fetchSubs()
+}
+
+// ── PROGNOSE ──
+function buildPrognoseData() {
+  const activeSubs = subs.filter(s => s.status === 'actief')
+  const labels = []
+  const values = []
+  const now = new Date()
+  for (let i = 0; i < 24; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
+    const total = activeSubs.reduce((t, s) => t + effectiveMonthlyEUR(s, d), 0)
+    labels.push(d.toLocaleDateString('nl-NL', { month: 'short', year: '2-digit' }))
+    values.push(parseFloat(total.toFixed(2)))
+  }
+  return { labels, values }
+}
+
+function renderPrognoseChart() {
+  const { labels, values } = buildPrognoseData()
+  const canvas = document.getElementById('prognose-canvas')
+  if (!canvas) return
+
+  if (prognoseChart) { prognoseChart.destroy(); prognoseChart = null }
+
+  prognoseChart = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        borderColor: '#4F8EF7',
+        backgroundColor: 'rgba(79,142,247,0.08)',
+        borderWidth: 2,
+        pointRadius: 3,
+        pointBackgroundColor: '#4F8EF7',
+        fill: true,
+        tension: 0.3,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => fmt(ctx.parsed.y) + '/mnd'
+          },
+          backgroundColor: '#1C1C22',
+          borderColor: '#2C2C35',
+          borderWidth: 1,
+          titleColor: '#F0F0F5',
+          bodyColor: '#8A8A9A',
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: '#2C2C35' },
+          ticks: { color: '#8A8A9A', font: { size: 10 }, maxRotation: 45 }
+        },
+        y: {
+          grid: { color: '#2C2C35' },
+          ticks: {
+            color: '#8A8A9A',
+            font: { size: 10 },
+            callback: v => '€ ' + v.toFixed(0)
+          }
+        }
+      }
+    }
+  })
+}
+
+// ── RENDER ──
+function setPanel(p) {
+  currentPanel = p
+  document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', ['beheer','overzicht','inzichten'][i] === p))
+  render()
+}
+
+function render() {
+  const activeSubs = subs.filter(s => s.status === 'actief')
+  const totalMonthly = activeSubs.reduce((t, s) => t + effectiveMonthlyEUR(s), 0)
+  if (currentPanel === 'beheer') renderBeheer(totalMonthly, activeSubs)
+  else if (currentPanel === 'overzicht') renderOverzicht(totalMonthly)
+  else renderInzichten(activeSubs)
+}
+
+function renderBeheer(totalMonthly, activeSubs) {
+  let html = `
+    <div class="totals">
+      <div class="total-card"><div class="lbl">Per maand</div><div class="val">${fmt(totalMonthly)}</div></div>
+      <div class="total-card"><div class="lbl">Per jaar</div><div class="val">${fmt(totalMonthly * 12)}</div></div>
+    </div>
+    <div class="cat-pills">
+      ${CAT_NAMES.map(c => `<button class="cat-pill${activeCat===c?' active':''}" onclick="setCat('${c}')">${CATS[c].icon} ${c}</button>`).join('')}
+    </div>`
+
+  const catItems = CATS[activeCat]?.items || []
+  if (catItems.length) {
+    html += `<div class="suggestions-grid">${catItems.map(item => {
+      const exists = subs.some(s => s.name?.toLowerCase() === item.name.toLowerCase())
+      return `<button class="suggestion-chip${exists?' active':''}" onclick="${exists?'':` quickAdd('${esc(item.name)}',${item.price},'${item.cycle}','${item.domain}')`}">${esc(item.name)}</button>`
+    }).join('')}</div>`
+  }
+
+  html += `<div class="section-lbl">Mijn abonnementen</div><div class="sub-list">`
+
+  for (const s of subs) {
+    const isExp = expandedIds.has(s.id)
+    const days = daysUntil(s.renew_date)
+    const monthly = effectiveMonthlyEUR(s)
+    const yearly = monthly * 12
+
+    let badge = ''
+    if (s.status === 'opgezegd') badge = `<span class="badge badge-cancelled">Opgezegd</span>`
+    else if (days !== null && days <= 7) badge = `<span class="badge badge-soon">over ${days}d</span>`
+    else if (days !== null && days <= 30) badge = `<span class="badge badge-ok">over ${days}d</span>`
+
+    const logoHtml = s.domain
+      ? `<img src="${logoUrl(s.domain)}" width="24" height="24" style="border-radius:6px" onerror="this.style.display='none';this.nextSibling.style.display='inline'" alt=""><span style="font-size:18px;display:none">${CATS[s.cat]?.icon||'📌'}</span>`
+      : `<span style="font-size:18px">${CATS[s.cat]?.icon||'📌'}</span>`
+
+    html += `
+      <div>
+        <div class="sub-row${s.status==='opgezegd'?' cancelled':''}${isExp?' expanded':''}" onclick="toggleExpand('${s.id}')">
+          <div class="sub-row-logo">${logoHtml}</div>
+          <span class="sub-row-name">${esc(s.name)||'(geen naam)'}</span>
+          <div class="sub-row-meta">
+            <span class="sub-row-price">${fmt(yearly)}/jr</span>
+            ${badge}
+          </div>
+          <span class="chevron${isExp?' open':''}">▶</span>
+          <button class="del-btn" onclick="event.stopPropagation();deleteSub('${s.id}')">✕</button>
+        </div>`
+
+    if (isExp) html += renderDetail(s)
+    html += `</div>`
+  }
+
+  html += `</div><button class="add-btn" onclick="openAddModal()">+ Abonnement toevoegen</button>`
+  document.getElementById('panel-content').innerHTML = html
+}
+
+function renderDetail(s) {
+  const km = s.kenmerken || []
+  const ph = (s.price_history || []).sort((a,b) => (a.valid_from||'').localeCompare(b.valid_from||''))
+  const kOpen = openAccordions.has(`k-${s.id}`)
+  const pOpen = openAccordions.has(`p-${s.id}`)
+  const kFilled = km.filter(k => k.value).length
+
+  return `
+    <div class="sub-detail">
+      <div class="sub-fields">
+        <div class="field-group full">
+          <div class="field-label">Naam</div>
+          <input class="field-input" value="${esc(s.name)}" onblur="saveField('${s.id}','name',this.value)">
+        </div>
+        <div class="field-group">
+          <div class="field-label">Prijs (€)</div>
+          <input class="field-input" type="number" value="${s.price}" step="0.01" onblur="saveField('${s.id}','price',parseFloat(this.value)||0)">
+        </div>
+        <div class="field-group">
+          <div class="field-label">Cyclus</div>
+          <select class="field-input" onchange="saveField('${s.id}','cycle',this.value)">
+            ${['maand','kwartaal','jaar'].map(c => `<option value="${c}"${s.cycle===c?' selected':''}>${c}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field-group">
+          <div class="field-label">Verlengdatum</div>
+          <input class="field-input" type="date" value="${s.renew_date||''}" onblur="saveField('${s.id}','renew_date',this.value)">
+        </div>
+        <div class="field-group">
+          <div class="field-label">Betaling</div>
+          <select class="field-input" onchange="saveField('${s.id}','payment_method',this.value)">
+            <option value="">— kies —</option>
+            ${PAYMENT_METHODS.map(m => `<option${s.payment_method===m?' selected':''}>${m}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field-group">
+          <div class="field-label">Categorie</div>
+          <select class="field-input" onchange="saveField('${s.id}','cat',this.value)">
+            ${CAT_NAMES.map(c => `<option value="${c}"${s.cat===c?' selected':''}>${CATS[c].icon} ${c}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field-group full">
+          <div class="field-label">Status</div>
+          <div class="status-trio">
+            <button class="status-btn${s.status==='actief'?' green':''}" onclick="saveField('${s.id}','status','actief')">✓ Actief</button>
+            <button class="status-btn" onclick="openOverstap('${s.id}')">🔄 Overstappen</button>
+            <button class="status-btn${s.status==='opgezegd'?' red':''}" onclick="saveField('${s.id}','status','opgezegd')">✕ Opgezegd</button>
+          </div>
+          ${s.predecessor_id ? `<div style="font-size:11px;color:#7C3AED;margin-top:5px">↩ Opvolger van ${esc(subs.find(x=>x.id===s.predecessor_id)?.name||'')}</div>` : ''}
+          ${s.status==='opgezegd'&&!s.successor_id ? `<div style="font-size:11px;color:var(--muted);margin-top:5px">Telt niet mee in totalen</div>` : ''}
+        </div>
+      </div>
+
+      <div class="accordion-section">
+        <button class="accordion-trigger" onclick="toggleAccordion('k-${s.id}')">
+          <span>📋 Kenmerken</span>
+          <span>
+            <span class="accordion-badge${kFilled>0?' filled':''}">${kFilled||'leeg'}</span>
+            <span class="accordion-chevron${kOpen?' open':''}">▶</span>
+          </span>
+        </button>
+        ${kOpen ? `<div class="accordion-body">
+          ${km.map((kv, ki) => `
+            <div class="kenmerk-row">
+              <input class="kenmerk-key" value="${esc(kv.key)}" onblur="saveKenmerk('${s.id}',${ki},'key',this.value)">
+              <input class="kenmerk-val" value="${esc(kv.value)}" placeholder="Waarde" onblur="saveKenmerk('${s.id}',${ki},'val',this.value)">
+              <button class="kenmerk-del" onclick="delKenmerk('${s.id}',${ki})">✕</button>
+            </div>`).join('')}
+          <button class="kenmerk-add-btn" onclick="addKenmerk('${s.id}')">+ Kenmerk toevoegen</button>
+        </div>` : ''}
+      </div>
+
+      <div class="accordion-section">
+        <button class="accordion-trigger" onclick="toggleAccordion('p-${s.id}')">
+          <span>📈 Prijswijzigingen</span>
+          <span>
+            <span class="accordion-badge${ph.length>0?' filled':''}">${ph.length||'geen'}</span>
+            <span class="accordion-chevron${pOpen?' open':''}">▶</span>
+          </span>
+        </button>
+        ${pOpen ? `<div class="accordion-body">
+          <div class="prijshist-current">Nu: <strong>€ ${parseFloat(s.price).toFixed(2).replace('.',',')} / ${s.cycle}</strong></div>
+          ${ph.map((p2, pi) => `
+            <div class="prijshist-row">
+              <input class="prijshist-input" type="date" value="${p2.valid_from||''}" onblur="savePH('${s.id}',${pi},'valid_from',this.value)">
+              <input class="prijshist-input" type="number" value="${p2.price}" step="0.01" onblur="savePH('${s.id}',${pi},'price',parseFloat(this.value)||0)">
+              <input class="prijshist-note" value="${esc(p2.note||'')}" placeholder="Notitie" onblur="savePH('${s.id}',${pi},'note',this.value)">
+              <button class="prijshist-del" onclick="delPH('${s.id}',${pi})">✕</button>
+            </div>`).join('')}
+          <button class="prijshist-add" onclick="addPH('${s.id}')">+ Geplande verhoging</button>
+        </div>` : ''}
+      </div>
+    </div>`
+}
+
+function renderOverzicht(totalMonthly) {
+  let html = `
+    <div class="totals">
+      <div class="total-card"><div class="lbl">Per maand</div><div class="val">${fmt(totalMonthly)}</div></div>
+      <div class="total-card"><div class="lbl">Per jaar</div><div class="val">${fmt(totalMonthly * 12)}</div></div>
+    </div>
+    <div class="section-lbl">Per categorie</div>`
+
+  for (const c of CAT_NAMES) {
+    const cs = subs.filter(s => s.cat === c && s.status === 'actief')
+    if (!cs.length) continue
+    const ct = cs.reduce((t, s) => t + effectiveMonthlyEUR(s), 0)
+    html += `<div class="cat-row"><span>${CATS[c].icon} ${c} <span style="color:var(--muted)">(${cs.length})</span></span><span style="font-family:monospace;font-weight:500">${fmt(ct)}/mnd</span></div>`
+  }
+
+  html += `
+    <div class="prognose-card">
+      <div class="prognose-title">Prognose komende 24 maanden</div>
+      <div class="prognose-chart"><canvas id="prognose-canvas"></canvas></div>
+    </div>`
+
+  document.getElementById('panel-content').innerHTML = html
+  // Draw chart after DOM update
+  requestAnimationFrame(renderPrognoseChart)
+}
+
+function renderInzichten(activeSubs) {
+  const cancelledSubs = subs.filter(s => s.status === 'opgezegd')
+  const savedMonthly = cancelledSubs.reduce((t, s) => {
+    if (s.successor_id) { const succ = subs.find(x => x.id === s.successor_id); return t + effectiveMonthlyEUR(s) - (succ ? effectiveMonthlyEUR(succ) : 0) }
+    return t + effectiveMonthlyEUR(s)
+  }, 0)
+
+  let html = ''
+  const streamers = activeSubs.filter(s => s.cat === 'Streaming')
+  if (streamers.length >= 3) html += `
+    <div style="padding:14px 16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:8px;display:flex;gap:12px">
+      <div style="font-size:18px">⚠</div>
+      <div><div style="font-weight:500;font-size:13px;margin-bottom:4px">${streamers.length} streamingdiensten</div>
+      <div style="font-size:12px;color:var(--muted)">${streamers.map(s=>esc(s.name)).join(', ')} — mogelijk overlap.</div></div>
+    </div>`
+
+  const soon = activeSubs.filter(s => { const d = daysUntil(s.renew_date); return d !== null && d >= 0 && d <= 14 })
+  if (soon.length) html += `
+    <div style="padding:14px 16px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:8px;display:flex;gap:12px">
+      <div style="font-size:18px">⏰</div>
+      <div><div style="font-weight:500;font-size:13px;margin-bottom:4px">Binnenkort verlengd</div>
+      <div style="font-size:12px;color:var(--muted)">${soon.map(s=>`${esc(s.name)} (over ${daysUntil(s.renew_date)}d)`).join(', ')}</div></div>
+    </div>`
+
+  if (savedMonthly > 0.01) html += `
+    <div style="padding:14px 16px;background:var(--green-bg);border:1px solid #b5d97a;border-radius:var(--radius-sm);margin-bottom:8px;display:flex;gap:12px">
+      <div style="font-size:18px">✓</div>
+      <div><div style="font-weight:500;font-size:13px;margin-bottom:4px">Bespaard: ${fmt(savedMonthly)}/mnd</div>
+      <div style="font-size:12px;color:var(--green)">Door opzeggen of overstappen.</div></div>
+    </div>`
+
+  if (!html) html = `<div style="color:var(--muted);font-size:13px;text-align:center;padding:40px 0">Geen inzichten op dit moment.</div>`
+  document.getElementById('panel-content').innerHTML = html
+}
+
+// ── INTERACTIONS ──
+function setCat(c) { activeCat = c; render() }
+function toggleExpand(id) { expandedIds.has(id) ? expandedIds.delete(id) : expandedIds.add(id); render() }
+function toggleAccordion(id) { openAccordions.has(id) ? openAccordions.delete(id) : openAccordions.add(id); render() }
+
+function saveField(id, field, value) {
+  localUpdate(id, { [field]: value })
+}
+
+function saveKenmerk(id, ki, part, value) {
+  const sub = subs.find(s => s.id === id); if (!sub) return
+  const km = [...(sub.kenmerken || [])]
+  km[ki] = { ...km[ki], [part === 'key' ? 'key' : 'value']: value }
+  localUpdate(id, { kenmerken: km })
+}
+
+function delKenmerk(id, ki) {
+  const sub = subs.find(s => s.id === id); if (!sub) return
+  localUpdate(id, { kenmerken: (sub.kenmerken || []).filter((_, j) => j !== ki) })
+}
+
+function addKenmerk(id) {
+  const sub = subs.find(s => s.id === id); if (!sub) return
+  localUpdate(id, { kenmerken: [...(sub.kenmerken || []), { key: '', value: '' }] })
+}
+
+function savePH(id, pi, field, value) {
+  const sub = subs.find(s => s.id === id); if (!sub) return
+  const ph = [...(sub.price_history || [])]
+  ph[pi] = { ...ph[pi], [field]: value }
+  localUpdate(id, { price_history: ph })
+}
+
+function delPH(id, pi) {
+  const sub = subs.find(s => s.id === id); if (!sub) return
+  localUpdate(id, { price_history: (sub.price_history || []).filter((_, j) => j !== pi) })
+}
+
+function addPH(id) {
+  const sub = subs.find(s => s.id === id); if (!sub) return
+  const newEntry = { price: parseFloat(sub.price) || 0, valid_from: '', note: '' }
+  localUpdate(id, { price_history: [...(sub.price_history || []), newEntry] })
+}
+
+function quickAdd(name, price, cycle, domain) {
+  addSub({ name, price, price_currency: '€', cycle, renew_date: '', cat: activeCat, domain, payment_method: '', status: 'actief', kenmerken: defaultKenmerken(activeCat) })
+}
+
+// ── ADD MODAL ──
+function openAddModal() {
+  const html = `
+    <div class="modal-header">
+      <span class="modal-title">Abonnement toevoegen</span>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-field"><label class="modal-label">Naam</label><input class="modal-input" id="af-name" placeholder="bijv. Netflix"></div>
+      <div class="modal-row">
+        <div class="modal-field"><label class="modal-label">Prijs (€)</label><input class="modal-input" id="af-price" type="number" step="0.01" placeholder="0,00"></div>
+        <div class="modal-field"><label class="modal-label">Cyclus</label>
+          <select class="modal-input" id="af-cycle">
+            <option value="maand">Per maand</option>
+            <option value="kwartaal">Per kwartaal</option>
+            <option value="jaar">Per jaar</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-row">
+        <div class="modal-field"><label class="modal-label">Verlengdatum</label><input class="modal-input" id="af-date" type="date"></div>
+        <div class="modal-field"><label class="modal-label">Betaalrekening</label>
+          <select class="modal-input" id="af-payment">
+            <option value="">— kies —</option>
+            ${PAYMENT_METHODS.map(m => `<option>${m}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="modal-field"><label class="modal-label">Categorie</label>
+        <select class="modal-input" id="af-cat">
+          <option value="">— kies —</option>
+          ${CAT_NAMES.map(c => `<option value="${c}">${CATS[c].icon} ${c}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal()">Annuleren</button>
+      <button class="btn-primary" onclick="submitAdd()">Toevoegen</button>
+    </div>`
+  showModal(html)
+}
+
+function submitAdd() {
+  const name = document.getElementById('af-name').value.trim()
+  const price = parseFloat(document.getElementById('af-price').value) || 0
+  const cycle = document.getElementById('af-cycle').value
+  const renew_date = document.getElementById('af-date').value
+  const payment_method = document.getElementById('af-payment').value
+  const cat = document.getElementById('af-cat').value
+  if (!name) return
+  addSub({ name, price, price_currency: '€', cycle, renew_date, cat, domain: '', payment_method, status: 'actief', kenmerken: defaultKenmerken(cat) })
+  closeModal()
+}
+
+// ── OVERSTAP MODAL ──
+let overstapState = { step: 1, sub: null, opzegDatum: '', nieuweNaam: '', nieuwePrijs: '', nieuweCyclus: 'maand' }
+
+function openOverstap(id) {
+  const sub = subs.find(s => s.id === id); if (!sub) return
+  overstapState = { step: 1, sub, opzegDatum: '', nieuweNaam: '', nieuwePrijs: String(sub.price), nieuweCyclus: sub.cycle }
+  renderOverstap()
+}
+
+function renderOverstap() {
+  const { step, sub } = overstapState
+  const dots = [1,2,3].map(n => `<div class="dot${n===step?' active':''}"></div>`).join('')
+  let body = ''
+
+  if (step === 1) {
+    body = `
+      <div style="font-size:13px;color:var(--muted);margin-bottom:8px">Huidig: ${esc(sub.name)} · ${fmt(effectiveMonthlyEUR(sub))}/mnd</div>
+      <div class="modal-field"><label class="modal-label">Opzegdatum</label>
+        <input class="modal-input" type="date" value="${overstapState.opzegDatum}" oninput="overstapState.opzegDatum=this.value">
+      </div>`
+  } else if (step === 2) {
+    body = `
+      <div class="modal-field"><label class="modal-label">Naam nieuwe aanbieder</label>
+        <input class="modal-input" value="${esc(overstapState.nieuweNaam)}" placeholder="bijv. Youfone" oninput="overstapState.nieuweNaam=this.value">
+      </div>
+      <div class="modal-row">
+        <div class="modal-field"><label class="modal-label">Prijs (€)</label>
+          <input class="modal-input" type="number" value="${overstapState.nieuwePrijs}" step="0.01" oninput="overstapState.nieuwePrijs=this.value">
+        </div>
+        <div class="modal-field"><label class="modal-label">Cyclus</label>
+          <select class="modal-input" onchange="overstapState.nieuweCyclus=this.value">
+            ${['maand','kwartaal','jaar'].map(c => `<option value="${c}"${overstapState.nieuweCyclus===c?' selected':''}>${c}</option>`).join('')}
+          </select>
+        </div>
+      </div>`
+  } else {
+    const oudMnd = effectiveMonthlyEUR(sub)
+    let nieuwMnd = parseFloat(overstapState.nieuwePrijs) || 0
+    if (overstapState.nieuweCyclus === 'jaar') nieuwMnd /= 12
+    if (overstapState.nieuweCyclus === 'kwartaal') nieuwMnd /= 3
+    const netto = oudMnd - nieuwMnd
+    body = `
+      <div style="padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:13px;margin-bottom:6px">
+        <div style="color:var(--muted);font-size:11px;margin-bottom:4px">OPGEZEGD</div>
+        <strong>${esc(sub.name)}</strong> · ${fmt(oudMnd)}/mnd
+      </div>
+      <div style="text-align:center;font-size:18px;color:var(--muted);margin-bottom:6px">↓</div>
+      <div style="padding:12px;background:var(--green-bg);border:1px solid #b5d97a;border-radius:var(--radius-sm);font-size:13px;margin-bottom:8px">
+        <div style="color:var(--green);font-size:11px;margin-bottom:4px">NIEUW</div>
+        <strong>${esc(overstapState.nieuweNaam)||'Nieuwe aanbieder'}</strong> · ${fmt(nieuwMnd)}/mnd
+      </div>
+      <div class="overstap-netto${netto<=0?' cost':''}">${netto>0?`✓ Besparing: ${fmt(netto)}/mnd · ${fmt(netto*12)}/jaar`:`⚠ Meerkosten: ${fmt(Math.abs(netto))}/mnd`}</div>`
+  }
+
+  showModal(`
+    <div class="modal-header">
+      <span class="modal-title">${esc(sub.name)} · Overstappen</span>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="dots">${dots}</div>
+      ${body}
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="${step>1?'overstapBack()':'closeModal()'}">${step>1?'← Terug':'Annuleren'}</button>
+      <button class="btn-primary" onclick="${step<3?'overstapNext()':'confirmOverstap()'}">${step<3?'Volgende →':'✓ Verwerken'}</button>
+    </div>`)
+}
+
+function overstapNext() { overstapState.step++; renderOverstap() }
+function overstapBack() { overstapState.step--; renderOverstap() }
+
+async function confirmOverstap() {
+  const { sub } = overstapState
+  const { data: { user } } = await sb.auth.getUser()
+  const { data: newSub } = await sb.from('subscriptions').insert({
+    name: overstapState.nieuweNaam, price: parseFloat(overstapState.nieuwePrijs) || 0,
+    price_currency: sub.price_currency, cycle: overstapState.nieuweCyclus,
+    renew_date: '', cat: sub.cat, payment_method: sub.payment_method,
+    domain: '', status: 'actief', predecessor_id: sub.id, user_id: user.id
+  }).select().single()
+  await sb.from('subscriptions').update({ status: 'opgezegd', successor_id: newSub?.id, renew_date: overstapState.opzegDatum || sub.renew_date }).eq('id', sub.id)
+  closeModal()
+  fetchSubs()
+}
+
+function showModal(html) {
+  document.getElementById('modal-box').innerHTML = html
+  document.getElementById('modal-overlay').style.display = 'flex'
+}
+function closeModal() {
+  document.getElementById('modal-overlay').style.display = 'none'
+}
+
+// ── INIT ──
+window.addEventListener('load', async () => {
+  const { data: { session } } = await sb.auth.getSession()
+  document.getElementById('loading').style.display = 'none'
+  if (session) {
+    document.getElementById('app-screen').style.display = 'block'
+    fetchSubs()
+  } else {
+    document.getElementById('login-screen').style.display = 'flex'
+  }
+})
+
+sb.auth.onAuthStateChange((event, session) => {
+  if (event === 'SIGNED_IN' && session) {
+    document.getElementById('login-screen').style.display = 'none'
+    document.getElementById('app-screen').style.display = 'block'
+    fetchSubs()
+  }
+})
+
+document.getElementById('login-email').addEventListener('keydown', e => { if (e.key === 'Enter') sendMagicLink() })
+</script>
+</body>
+</html>
