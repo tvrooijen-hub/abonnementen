@@ -675,33 +675,155 @@ function renderDetail(s) {
 }
 
 function renderOverzicht(totalMonthly) {
+  const activeSubs = subs.filter(s => s.status === 'actief')
+
+  // Categorie data
+  const catRows = []
+  for (const c of CAT_NAMES) {
+    const cs = activeSubs.filter(s => s.cat === c)
+    if (!cs.length) continue
+    const ct = cs.reduce((t, s) => t + effectiveMonthlyEUR(s), 0)
+    catRows.push({ cat: c, total: ct, count: cs.length })
+  }
+
+  // Betaalrekening data
+  const byPayment = {}
+  for (const s of activeSubs) {
+    const pm = s.payment_method || 'Onbekend'
+    byPayment[pm] = (byPayment[pm] || 0) + effectiveMonthlyEUR(s)
+  }
+
+  // 6-maands trend (huidig vs vorige maanden op basis van price_history)
+  const now = new Date()
+  const trendLabels = []
+  const trendData = []
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+    trendLabels.push(d.toLocaleDateString('nl-NL', { month: 'short' }))
+    trendData.push(parseFloat(activeSubs.reduce((t, s) => t + effectiveMonthlyEUR(s, d), 0).toFixed(2)))
+  }
+
   let html = `
     <div class="totals">
       <div class="total-card"><div class="lbl">Per maand</div><div class="val">${fmt(totalMonthly)}</div></div>
       <div class="total-card"><div class="lbl">Per jaar</div><div class="val">${fmt(totalMonthly * 12)}</div></div>
     </div>
-    <div class="section-lbl">Per categorie</div>`
 
-  for (const c of CAT_NAMES) {
-    const cs = subs.filter(s => s.cat === c && s.status === 'actief')
-    if (!cs.length) continue
-    const ct = cs.reduce((t, s) => t + effectiveMonthlyEUR(s), 0)
-    html += `<div class="cat-row"><span>${CATS[c].icon} ${c} <span style="color:var(--muted)">(${cs.length})</span></span><span style="font-family:monospace;font-weight:500">${fmt(ct)}/mnd</span></div>`
-  }
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+      <div class="prognose-card" style="margin-top:0">
+        <div class="prognose-title">Per categorie</div>
+        <div style="position:relative;height:160px;display:flex;align-items:center;justify-content:center">
+          <canvas id="donut-canvas"></canvas>
+          <div style="position:absolute;text-align:center;pointer-events:none">
+            <div style="font-size:11px;color:var(--muted)">totaal</div>
+            <div style="font-size:14px;font-weight:600;font-family:monospace">${fmt(totalMonthly)}</div>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;margin-top:8px">
+          ${catRows.map((r, i) => `
+            <div style="display:flex;align-items:center;gap:6px;font-size:11px">
+              <div style="width:8px;height:8px;border-radius:50%;background:${CAT_COLORS[i % CAT_COLORS.length]};flex-shrink:0"></div>
+              <span style="flex:1;color:var(--muted)">${CATS[r.cat]?.icon || ''} ${r.cat}</span>
+              <span style="font-family:monospace;font-weight:500">${fmt(r.total)}</span>
+            </div>`).join('')}
+        </div>
+      </div>
 
-  html += `
-    <div class="section-lbl">Per betaalrekening</div>`
+      <div class="prognose-card" style="margin-top:0">
+        <div class="prognose-title">Trend · 6 maanden</div>
+        <div style="position:relative;height:160px"><canvas id="trend-canvas"></canvas></div>
+        <div style="margin-top:10px;display:flex;flex-direction:column;gap:4px">
+          <div class="prognose-title" style="margin-bottom:4px">Per betaalrekening</div>
+          ${Object.entries(byPayment).map(([pm, t]) => `
+            <div style="display:flex;justify-content:space-between;font-size:11px">
+              <span style="color:var(--muted)">💳 ${esc(pm)}</span>
+              <span style="font-family:monospace;font-weight:500">${fmt(t)}/mnd</span>
+            </div>`).join('')}
+        </div>
+      </div>
+    </div>
 
-  const byPayment = {}
-  for (const s of subs.filter(s => s.status === 'actief')) {
-    const pm = s.payment_method || 'Onbekend'
-    byPayment[pm] = (byPayment[pm] || 0) + effectiveMonthlyEUR(s)
-  }
-  for (const [pm, total] of Object.entries(byPayment)) {
-    html += `<div class="cat-row"><span>💳 ${esc(pm)}</span><span style="font-family:monospace;font-weight:500">${fmt(total)}/mnd</span></div>`
-  }
+    <div class="section-lbl">Per categorie</div>
+    ${catRows.map(r => `<div class="cat-row"><span>${CATS[r.cat]?.icon || ''} ${r.cat} <span style="color:var(--muted)">(${r.count})</span></span><span style="font-family:monospace;font-weight:500">${fmt(r.total)}/mnd</span></div>`).join('')}
+  `
 
   document.getElementById('panel-content').innerHTML = html
+
+  requestAnimationFrame(() => {
+    // Donut chart
+    const donutCanvas = document.getElementById('donut-canvas')
+    if (donutCanvas) {
+      new Chart(donutCanvas, {
+        type: 'doughnut',
+        data: {
+          labels: catRows.map(r => `${CATS[r.cat]?.icon || ''} ${r.cat}`),
+          datasets: [{
+            data: catRows.map(r => parseFloat(r.total.toFixed(2))),
+            backgroundColor: catRows.map((_, i) => CAT_COLORS[i % CAT_COLORS.length] + 'CC'),
+            borderColor: catRows.map((_, i) => CAT_COLORS[i % CAT_COLORS.length]),
+            borderWidth: 1,
+            hoverOffset: 4
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          cutout: '65%',
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#1C1C22',
+              borderColor: '#2C2C35',
+              borderWidth: 1,
+              titleColor: '#F0F0F5',
+              bodyColor: '#8A8A9A',
+              callbacks: { label: ctx => ` ${fmt(ctx.parsed)}/mnd` }
+            }
+          }
+        }
+      })
+    }
+
+    // Trend lijn
+    const trendCanvas = document.getElementById('trend-canvas')
+    if (trendCanvas) {
+      new Chart(trendCanvas, {
+        type: 'line',
+        data: {
+          labels: trendLabels,
+          datasets: [{
+            data: trendData,
+            borderColor: '#4F8EF7',
+            backgroundColor: '#4F8EF722',
+            borderWidth: 2,
+            pointRadius: 3,
+            pointBackgroundColor: '#4F8EF7',
+            tension: 0.3,
+            fill: true
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#1C1C22',
+              borderColor: '#2C2C35',
+              borderWidth: 1,
+              titleColor: '#F0F0F5',
+              bodyColor: '#8A8A9A',
+              callbacks: { label: ctx => ` ${fmt(ctx.parsed.y)}/mnd` }
+            }
+          },
+          scales: {
+            x: { grid: { color: '#2C2C35' }, ticks: { color: '#8A8A9A', font: { size: 10 } } },
+            y: { grid: { color: '#2C2C35' }, ticks: { color: '#8A8A9A', font: { size: 10 }, callback: v => '€' + v.toFixed(0) } }
+          }
+        }
+      })
+    }
+  })
 }
 
 function renderInzichten(activeSubs) {
@@ -1031,10 +1153,13 @@ function buildPrognoseEvents() {
 
     future.forEach(ph => {
       const d = new Date(ph.valid_from)
-      const currentMonthly = effectiveMonthlyEUR(s)
-      const newMonthly = toMonthly(ph.price, s.cycle)
+      // Prijs net vóór deze wijziging (een dag eerder)
+      const dayBefore = new Date(d); dayBefore.setDate(dayBefore.getDate() - 1)
+      const currentMonthly = effectiveMonthlyEUR(s, dayBefore)
+      const newMonthly = toMonthly(parseFloat(ph.price), s.cycle) * (s.price_currency === '$' ? 1 / USD_RATE : 1)
       const diffMonthly = newMonthly - currentMonthly
-      const diffActual = ph.price - s.price // verschil in originele cyclus bedrag
+      const diffActual = parseFloat(ph.price) - parseFloat(s.price)
+      const oldPrice = effectiveMonthlyEUR(s, dayBefore) * (s.cycle === 'jaar' ? 12 : s.cycle === 'kwartaal' ? 3 : 1)
       events.push({
         type: 'prijs',
         date: d,
@@ -1042,8 +1167,8 @@ function buildPrognoseEvents() {
         diff: diffMonthly,
         diffActual,
         cycle: s.cycle,
-        newPrice: ph.price,
-        oldPrice: s.price,
+        newPrice: parseFloat(ph.price),
+        oldPrice,
         note: ph.note,
         icon: diffMonthly > 0 ? '📈' : '📉'
       })
