@@ -191,8 +191,8 @@
     <div class="nav-tabs">
       <button class="tab active" onclick="setPanel('beheer')">Abonnementen</button>
       <button class="tab" onclick="setPanel('overzicht')">Overzicht</button>
-      <button class="tab" onclick="setPanel('prognose')">Prognose</button>
       <button class="tab" onclick="setPanel('inzichten')">Inzichten</button>
+      <button class="tab" onclick="setPanel('prognose')">Prognose</button>
       <button class="logout-btn" onclick="handleLogout()">Uitloggen</button>
     </div>
   </nav>
@@ -387,9 +387,16 @@ function localUpdate(id, fields) {
   persistUpdate(subs[idx], fields)
 }
 
+function sanitizeDates(obj) {
+  const dateFields = ['renew_date', 'valid_from']
+  const out = { ...obj }
+  dateFields.forEach(f => { if (f in out && !out[f]) out[f] = null })
+  return out
+}
+
 async function persistUpdate(sub, fields) {
   const { kenmerken, price_history, ...rest } = fields
-  if (Object.keys(rest).length) await sb.from('subscriptions').update(rest).eq('id', sub.id)
+  if (Object.keys(rest).length) await sb.from('subscriptions').update(sanitizeDates(rest)).eq('id', sub.id)
   if (kenmerken !== undefined) {
     await sb.from('kenmerken').delete().eq('subscription_id', sub.id)
     if (kenmerken.length) await sb.from('kenmerken').insert(
@@ -399,7 +406,7 @@ async function persistUpdate(sub, fields) {
   if (price_history !== undefined) {
     await sb.from('price_history').delete().eq('subscription_id', sub.id)
     if (price_history.length) await sb.from('price_history').insert(
-      price_history.map(ph => ({ subscription_id: sub.id, user_id: sub.user_id, price: ph.price, valid_from: ph.valid_from, note: ph.note || null }))
+      price_history.map(ph => sanitizeDates({ subscription_id: sub.id, user_id: sub.user_id, price: ph.price, valid_from: ph.valid_from, note: ph.note || null }))
     )
   }
 }
@@ -407,7 +414,7 @@ async function persistUpdate(sub, fields) {
 async function addSub(data) {
   const { data: { user } } = await sb.auth.getUser()
   const { kenmerken, ...rest } = data
-  const { data: sub } = await sb.from('subscriptions').insert({ ...rest, user_id: user.id }).select().single()
+  const { data: sub } = await sb.from('subscriptions').insert(sanitizeDates({ ...rest, user_id: user.id })).select().single()
   if (sub && kenmerken?.length) await sb.from('kenmerken').insert(
     kenmerken.map((k, i) => ({ subscription_id: sub.id, user_id: user.id, key: k.key, value: k.value || '', sort_order: i }))
   )
@@ -495,7 +502,7 @@ function renderPrognoseChart() {
 // ── RENDER ──
 function setPanel(p) {
   currentPanel = p
-  document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', ['beheer','overzicht','prognose','inzichten'][i] === p))
+  document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', ['beheer','overzicht','inzichten','prognose'][i] === p))
   render()
 }
 
@@ -609,11 +616,11 @@ function renderDetail(s) {
           <div class="field-label">Status</div>
           <div class="status-trio">
             <button class="status-btn${s.status==='actief'?' green':''}" onclick="saveField('${s.id}','status','actief')">✓ Actief</button>
-            <button class="status-btn" onclick="openOverstap('${s.id}')">🔄 Overstappen</button>
-            <button class="status-btn${s.status==='opgezegd'?' red':''}" onclick="saveField('${s.id}','status','opgezegd')">✕ Opgezegd</button>
+            <button class="status-btn" onclick="openOverstap('${s.id}')">🔄 Wijzigen</button>
+            <button class="status-btn${s.status==='opgezegd'?' red':''}" onclick="openOpzeggen('${s.id}')">✕ Opzeggen</button>
           </div>
           ${s.predecessor_id ? `<div style="font-size:11px;color:#7C3AED;margin-top:5px">↩ Opvolger van ${esc(subs.find(x=>x.id===s.predecessor_id)?.name||'')}</div>` : ''}
-          ${s.status==='opgezegd'&&!s.successor_id ? `<div style="font-size:11px;color:var(--muted);margin-top:5px">Telt niet mee in totalen</div>` : ''}
+          ${s.status==='opgezegd' ? `<div style="font-size:11px;color:var(--muted);margin-top:5px">Opgezegd${s.renew_date ? ' · eindigt ' + s.renew_date : ''} · telt niet mee in totalen</div>` : ''}
         </div>
       </div>
 
@@ -826,33 +833,70 @@ function submitAdd() {
   closeModal()
 }
 
-// ── OVERSTAP MODAL ──
-let overstapState = { step: 1, sub: null, opzegDatum: '', nieuweNaam: '', nieuwePrijs: '', nieuweCyclus: 'maand' }
+// ── OPZEGGEN MODAL ──
+function openOpzeggen(id) {
+  const sub = subs.find(s => s.id === id); if (!sub) return
+  showModal(`
+    <div class="modal-header">
+      <span class="modal-title">${esc(sub.name)} · Opzeggen</span>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:13px;color:var(--muted);margin-bottom:8px">
+        Huidig: ${fmt(effectiveMonthlyEUR(sub))}/mnd · Dit abonnement telt daarna niet meer mee in totalen.
+      </div>
+      <div class="modal-field">
+        <label class="modal-label">Einddatum (optioneel)</label>
+        <input class="modal-input" type="date" id="opzeg-datum" value="${sub.renew_date||''}">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal()">Annuleren</button>
+      <button class="btn-primary" onclick="confirmOpzeggen('${sub.id}')">✕ Bevestig opzeggen</button>
+    </div>`)
+}
+
+async function confirmOpzeggen(id) {
+  const datum = document.getElementById('opzeg-datum').value
+  await localUpdate(id, { status: 'opgezegd', renew_date: datum || null })
+  closeModal()
+}
+
+// ── OVERSTAP / WIJZIG MODAL ──
+let overstapState = { step: 1, sub: null, type: 'upgrade', opzegDatum: '', nieuweNaam: '', nieuwePrijs: '', nieuweCyclus: 'maand' }
 
 function openOverstap(id) {
   const sub = subs.find(s => s.id === id); if (!sub) return
-  overstapState = { step: 1, sub, opzegDatum: '', nieuweNaam: '', nieuwePrijs: String(sub.price), nieuweCyclus: sub.cycle }
+  overstapState = { step: 1, sub, type: 'upgrade', opzegDatum: '', nieuweNaam: '', nieuwePrijs: String(sub.price), nieuweCyclus: sub.cycle }
   renderOverstap()
 }
 
 function renderOverstap() {
-  const { step, sub } = overstapState
+  const { step, sub, type } = overstapState
   const dots = [1,2,3].map(n => `<div class="dot${n===step?' active':''}"></div>`).join('')
   let body = ''
 
   if (step === 1) {
     body = `
-      <div style="font-size:13px;color:var(--muted);margin-bottom:8px">Huidig: ${esc(sub.name)} · ${fmt(effectiveMonthlyEUR(sub))}/mnd</div>
-      <div class="modal-field"><label class="modal-label">Opzegdatum</label>
+      <div style="font-size:13px;color:var(--muted);margin-bottom:12px">Huidig: ${esc(sub.name)} · ${fmt(effectiveMonthlyEUR(sub))}/mnd</div>
+      <div class="modal-field" style="margin-bottom:10px">
+        <label class="modal-label">Type wijziging</label>
+        <div style="display:flex;gap:6px;margin-top:4px">
+          <button class="status-btn${type==='upgrade'?' green':''}" style="flex:1" onclick="overstapState.type='upgrade';renderOverstap()">⬆ Upgrade / Overstap</button>
+          <button class="status-btn${type==='downgrade'?' green':''}" style="flex:1" onclick="overstapState.type='downgrade';renderOverstap()">⬇ Downgrade</button>
+        </div>
+      </div>
+      <div class="modal-field"><label class="modal-label">Einddatum huidig abonnement (optioneel)</label>
         <input class="modal-input" type="date" value="${overstapState.opzegDatum}" oninput="overstapState.opzegDatum=this.value">
       </div>`
   } else if (step === 2) {
+    const isDown = type === 'downgrade'
     body = `
-      <div class="modal-field"><label class="modal-label">Naam nieuwe aanbieder</label>
-        <input class="modal-input" value="${esc(overstapState.nieuweNaam)}" placeholder="bijv. Youfone" oninput="overstapState.nieuweNaam=this.value">
+      <div class="modal-field"><label class="modal-label">${isDown ? 'Naam nieuw abonnement / tier' : 'Naam nieuwe aanbieder'}</label>
+        <input class="modal-input" value="${esc(overstapState.nieuweNaam)}" placeholder="${isDown ? 'bijv. ChatGPT Free' : 'bijv. Youfone'}" oninput="overstapState.nieuweNaam=this.value">
       </div>
       <div class="modal-row">
-        <div class="modal-field"><label class="modal-label">Prijs (€)</label>
+        <div class="modal-field"><label class="modal-label">Nieuwe prijs (€)</label>
           <input class="modal-input" type="number" value="${overstapState.nieuwePrijs}" step="0.01" oninput="overstapState.nieuwePrijs=this.value">
         </div>
         <div class="modal-field"><label class="modal-label">Cyclus</label>
@@ -867,14 +911,15 @@ function renderOverstap() {
     if (overstapState.nieuweCyclus === 'jaar') nieuwMnd /= 12
     if (overstapState.nieuweCyclus === 'kwartaal') nieuwMnd /= 3
     const netto = oudMnd - nieuwMnd
+    const isDown = type === 'downgrade'
     body = `
       <div style="padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:13px;margin-bottom:6px">
-        <div style="color:var(--muted);font-size:11px;margin-bottom:4px">OPGEZEGD</div>
+        <div style="color:var(--muted);font-size:11px;margin-bottom:4px">${isDown ? 'HUIDIG' : 'OPGEZEGD'}</div>
         <strong>${esc(sub.name)}</strong> · ${fmt(oudMnd)}/mnd
       </div>
-      <div style="text-align:center;font-size:18px;color:var(--muted);margin-bottom:6px">↓</div>
+      <div style="text-align:center;font-size:18px;color:var(--muted);margin-bottom:6px">${isDown ? '⬇' : '↓'}</div>
       <div style="padding:12px;background:var(--green-bg);border:1px solid #b5d97a;border-radius:var(--radius-sm);font-size:13px;margin-bottom:8px">
-        <div style="color:var(--green);font-size:11px;margin-bottom:4px">NIEUW</div>
+        <div style="color:var(--green);font-size:11px;margin-bottom:4px">${isDown ? 'DOWNGRADE' : 'NIEUW'}</div>
         <strong>${esc(overstapState.nieuweNaam)||'Nieuwe aanbieder'}</strong> · ${fmt(nieuwMnd)}/mnd
       </div>
       <div class="overstap-netto${netto<=0?' cost':''}">${netto>0?`✓ Besparing: ${fmt(netto)}/mnd · ${fmt(netto*12)}/jaar`:`⚠ Meerkosten: ${fmt(Math.abs(netto))}/mnd`}</div>`
@@ -882,7 +927,7 @@ function renderOverstap() {
 
   showModal(`
     <div class="modal-header">
-      <span class="modal-title">${esc(sub.name)} · Overstappen</span>
+      <span class="modal-title">${esc(sub.name)} · ${type === 'downgrade' ? 'Downgrade' : 'Wijzigen'}</span>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
