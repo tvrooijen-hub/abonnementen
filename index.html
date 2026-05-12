@@ -1253,7 +1253,7 @@ function renderPrognoseMainChart() {
         data: catData[cat],
         borderColor: color,
         backgroundColor: 'transparent',
-        borderWidth: 2,
+        borderWidth: 1.5,
         pointRadius: 0,
         pointHoverRadius: 4,
         tension: 0.3,
@@ -1261,6 +1261,26 @@ function renderPrognoseMainChart() {
       }
     }
   })
+
+  // Voeg totaallijn toe in lijnmodus
+  if (prognoseViewMode === 'lijn') {
+    const totalData = labels.map((_, i) =>
+      parseFloat(usedCats.reduce((t, cat) => t + catData[cat][i], 0).toFixed(2))
+    )
+    datasets.push({
+      label: 'Totaal',
+      data: totalData,
+      borderColor: '#ffffff',
+      backgroundColor: 'transparent',
+      borderWidth: 2.5,
+      borderDash: [4, 3],
+      pointRadius: 0,
+      pointHoverRadius: 5,
+      tension: 0.3,
+      fill: false,
+      order: -1
+    })
+  }
 
   prognoseMainChart = new Chart(canvas, {
     type: prognoseViewMode === 'gestapeld' ? 'bar' : 'line',
@@ -1304,11 +1324,19 @@ function renderPrognoseMainChart() {
   // Custom legend
   const legend = document.getElementById('prog-legend')
   if (legend) {
-    legend.innerHTML = usedCats.map((cat, i) => `
+    let legendItems = usedCats.map((cat, i) => `
       <div class="prog-legend-item">
         <div class="prog-legend-dot" style="background:${CAT_COLORS[i % CAT_COLORS.length]}"></div>
         ${CATS[cat]?.icon || ''} ${cat}
-      </div>`).join('')
+      </div>`)
+    if (prognoseViewMode === 'lijn') {
+      legendItems.push(`
+        <div class="prog-legend-item">
+          <div class="prog-legend-dot" style="background:#ffffff;opacity:0.7"></div>
+          Totaal
+        </div>`)
+    }
+    legend.innerHTML = legendItems.join('')
   }
 }
 
