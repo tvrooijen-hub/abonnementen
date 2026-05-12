@@ -127,6 +127,8 @@
   .modal-label { font-size: 11px; color: var(--muted); }
   .modal-input { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px; color: var(--text); font-size: 13px; outline: none; width: 100%; }
   .modal-input:focus { border-color: var(--blue); }
+  .modal-input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); opacity: 0.6; cursor: pointer; }
+  .field-input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(1); opacity: 0.6; cursor: pointer; }
   .modal-footer { display: flex; gap: 8px; padding: 0 16px 16px; }
   .btn-secondary { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; color: var(--muted); font-size: 13px; cursor: pointer; }
   .btn-primary { flex: 2; background: var(--blue); border: none; border-radius: 6px; padding: 10px; color: #fff; font-size: 13px; font-weight: 500; cursor: pointer; }
@@ -944,15 +946,37 @@ function overstapNext() { overstapState.step++; renderOverstap() }
 function overstapBack() { overstapState.step--; renderOverstap() }
 
 async function confirmOverstap() {
-  const { sub } = overstapState
+  const { sub, type } = overstapState
   const { data: { user } } = await sb.auth.getUser()
-  const { data: newSub } = await sb.from('subscriptions').insert({
-    name: overstapState.nieuweNaam, price: parseFloat(overstapState.nieuwePrijs) || 0,
-    price_currency: sub.price_currency, cycle: overstapState.nieuweCyclus,
-    renew_date: '', cat: sub.cat, payment_method: sub.payment_method,
-    domain: '', status: 'actief', predecessor_id: sub.id, user_id: user.id
-  }).select().single()
-  await sb.from('subscriptions').update({ status: 'opgezegd', successor_id: newSub?.id, renew_date: overstapState.opzegDatum || sub.renew_date }).eq('id', sub.id)
+
+  if (type === 'downgrade') {
+    // Downgrade: update het bestaande abonnement met nieuwe naam/prijs
+    await sb.from('subscriptions').update({
+      name: overstapState.nieuweNaam || sub.name,
+      price: parseFloat(overstapState.nieuwePrijs) || 0,
+      cycle: overstapState.nieuweCyclus,
+    }).eq('id', sub.id)
+  } else {
+    // Upgrade / overstap: nieuw abonnement aanmaken, oude opzeggen
+    const { data: newSub } = await sb.from('subscriptions').insert({
+      name: overstapState.nieuweNaam,
+      price: parseFloat(overstapState.nieuwePrijs) || 0,
+      price_currency: sub.price_currency,
+      cycle: overstapState.nieuweCyclus,
+      renew_date: null,
+      cat: sub.cat,
+      payment_method: sub.payment_method,
+      domain: '',
+      status: 'actief',
+      predecessor_id: sub.id,
+      user_id: user.id
+    }).select().single()
+    await sb.from('subscriptions').update({
+      status: 'opgezegd',
+      successor_id: newSub?.id,
+      renew_date: overstapState.opzegDatum || null
+    }).eq('id', sub.id)
+  }
   closeModal()
   fetchSubs()
 }
@@ -1200,6 +1224,14 @@ sb.auth.onAuthStateChange((event, session) => {
 })
 
 document.getElementById('login-email').addEventListener('keydown', e => { if (e.key === 'Enter') sendMagicLink() })
+
+// Prevent backspace from navigating back when focus is in an input/select/textarea
+document.addEventListener('keydown', e => {
+  if (e.key === 'Backspace') {
+    const tag = document.activeElement?.tagName
+    if (!['INPUT','TEXTAREA','SELECT'].includes(tag)) e.preventDefault()
+  }
+})
 </script>
 </body>
 </html>
