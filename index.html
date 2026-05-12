@@ -661,14 +661,28 @@ function renderDetail(s) {
         </button>
         ${pOpen ? `<div class="accordion-body">
           <div class="prijshist-current">Nu: <strong>€ ${parseFloat(s.price).toFixed(2).replace('.',',')} / ${s.cycle}</strong></div>
-          ${ph.map((p2, pi) => `
-            <div class="prijshist-row">
+          <div style="display:grid;grid-template-columns:110px 90px 1fr auto;gap:4px;margin-bottom:4px;padding:0 2px">
+            <span style="font-size:10px;color:var(--muted)">Ingangsdatum</span>
+            <span style="font-size:10px;color:var(--muted)">Nieuw bedrag (€)</span>
+            <span style="font-size:10px;color:var(--muted)">Notitie</span>
+            <span></span>
+          </div>
+          ${ph.map((p2, pi) => {
+            const newMonthly = toMonthly(parseFloat(p2.price)||0, s.cycle)
+            const oldMonthly = toMonthly(parseFloat(s.price)||0, s.cycle)
+            const pctChange = oldMonthly ? ((newMonthly - oldMonthly) / oldMonthly * 100) : 0
+            const pctLabel = pctChange > 0 ? `<span style="color:var(--red);font-size:10px">+${pctChange.toFixed(0)}%</span>` : pctChange < 0 ? `<span style="color:var(--green);font-size:10px">${pctChange.toFixed(0)}%</span>` : ''
+            return `
+            <div class="prijshist-row" style="align-items:center">
               <input class="prijshist-input" type="date" value="${p2.valid_from||''}" onblur="savePH('${s.id}',${pi},'valid_from',this.value)">
-              <input class="prijshist-input" type="number" value="${p2.price}" step="0.01" onblur="savePH('${s.id}',${pi},'price',parseFloat(this.value)||0)">
-              <input class="prijshist-note" value="${esc(p2.note||'')}" placeholder="Notitie" onblur="savePH('${s.id}',${pi},'note',this.value)">
+              <div style="display:flex;flex-direction:column;gap:2px">
+                <input class="prijshist-input" type="number" value="${p2.price}" step="0.01" onblur="savePH('${s.id}',${pi},'price',parseFloat(this.value)||0)">
+                ${pctLabel}
+              </div>
+              <input class="prijshist-note" value="${esc(p2.note||'')}" placeholder="bijv. jaarlijkse indexatie" onblur="savePH('${s.id}',${pi},'note',this.value)">
               <button class="prijshist-del" onclick="delPH('${s.id}',${pi})">✕</button>
-            </div>`).join('')}
-          <button class="prijshist-add" onclick="addPH('${s.id}')">+ Geplande verhoging</button>
+            </div>`}).join('')}
+          <button class="prijshist-add" onclick="addPH('${s.id}')">+ Geplande wijziging</button>
         </div>` : ''}
       </div>
     </div>`
@@ -890,7 +904,12 @@ function addKenmerk(id) {
 function savePH(id, pi, field, value) {
   const sub = subs.find(s => s.id === id); if (!sub) return
   const ph = [...(sub.price_history || [])]
-  ph[pi] = { ...ph[pi], [field]: value }
+  // Zorg dat datums altijd in ISO formaat (YYYY-MM-DD) opgeslagen worden
+  let v = value
+  if (field === 'valid_from' && v) {
+    const d = new Date(v); if (!isNaN(d)) v = d.toISOString().split('T')[0]
+  }
+  ph[pi] = { ...ph[pi], [field]: v }
   localUpdate(id, { price_history: ph })
 }
 
