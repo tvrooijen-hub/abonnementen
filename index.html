@@ -170,6 +170,11 @@
   .prog-view-toggle { display: flex; gap: 4px; }
   .prog-view-btn { background: none; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 11px; color: var(--muted); cursor: pointer; }
   .prog-view-btn.active { border-color: var(--blue); color: var(--blue); }
+  .invite-btn { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 6px 8px; }
+  .invite-btn:hover { color: var(--text); }
+  .invite-link-box { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 12px; color: var(--muted); word-break: break-all; margin: 8px 0; }
+  .invite-copy-btn { width: 100%; background: var(--blue); border: none; border-radius: 6px; padding: 9px; color: #fff; font-size: 13px; font-weight: 500; cursor: pointer; margin-top: 4px; }
+  .invite-whatsapp-btn { width: 100%; background: #25D366; border: none; border-radius: 6px; padding: 9px; color: #fff; font-size: 13px; font-weight: 500; cursor: pointer; margin-top: 6px; }
 
   #loading { display: flex; align-items: center; justify-content: center; height: 100vh; color: var(--muted); }
 </style>
@@ -195,6 +200,7 @@
       <button class="tab" onclick="setPanel('overzicht')">Overzicht</button>
       <button class="tab" onclick="setPanel('inzichten')">Inzichten</button>
       <button class="tab" onclick="setPanel('prognose')">Prognose</button>
+      <button class="invite-btn" onclick="openInviteModal()" title="Delen">👥</button>
       <button class="logout-btn" onclick="handleLogout()">Uitloggen</button>
     </div>
   </nav>
@@ -949,34 +955,27 @@ async function confirmOverstap() {
   const { sub, type } = overstapState
   const { data: { user } } = await sb.auth.getUser()
 
-  if (type === 'downgrade') {
-    // Downgrade: update het bestaande abonnement met nieuwe naam/prijs
-    await sb.from('subscriptions').update({
-      name: overstapState.nieuweNaam || sub.name,
-      price: parseFloat(overstapState.nieuwePrijs) || 0,
-      cycle: overstapState.nieuweCyclus,
-    }).eq('id', sub.id)
-  } else {
-    // Upgrade / overstap: nieuw abonnement aanmaken, oude opzeggen
-    const { data: newSub } = await sb.from('subscriptions').insert({
-      name: overstapState.nieuweNaam,
-      price: parseFloat(overstapState.nieuwePrijs) || 0,
-      price_currency: sub.price_currency,
-      cycle: overstapState.nieuweCyclus,
-      renew_date: null,
-      cat: sub.cat,
-      payment_method: sub.payment_method,
-      domain: '',
-      status: 'actief',
-      predecessor_id: sub.id,
-      user_id: user.id
-    }).select().single()
-    await sb.from('subscriptions').update({
-      status: 'opgezegd',
-      successor_id: newSub?.id,
-      renew_date: overstapState.opzegDatum || null
-    }).eq('id', sub.id)
-  }
+  // Beide upgrade én downgrade: nieuw abonnement aanmaken, oude opzeggen
+  const { data: newSub } = await sb.from('subscriptions').insert({
+    name: overstapState.nieuweNaam || sub.name,
+    price: parseFloat(overstapState.nieuwePrijs) || 0,
+    price_currency: sub.price_currency,
+    cycle: overstapState.nieuweCyclus,
+    renew_date: null,
+    cat: sub.cat,
+    payment_method: sub.payment_method,
+    domain: sub.domain || '',
+    status: 'actief',
+    predecessor_id: sub.id,
+    user_id: user.id
+  }).select().single()
+
+  await sb.from('subscriptions').update({
+    status: 'opgezegd',
+    successor_id: newSub?.id,
+    renew_date: overstapState.opzegDatum || null
+  }).eq('id', sub.id)
+
   closeModal()
   fetchSubs()
 }
@@ -1203,6 +1202,109 @@ function setPrognoseView(mode) {
   renderPrognosePanel(subs.filter(s => s.status === 'actief'))
 }
 
+// ── INVITE FLOW ──
+async function openInviteModal() {
+  showModal(`
+    <div class="modal-header">
+      <span class="modal-title">👥 Uitnodigen</span>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:13px;color:var(--muted);margin-bottom:12px">
+        Genereer een uitnodigingslink en deel die via WhatsApp. De ontvanger logt in en ziet automatisch jouw abonnementen.
+      </div>
+      <div id="invite-content" style="text-align:center;color:var(--muted);font-size:13px;padding:16px 0">Link genereren…</div>
+    </div>`)
+  await generateInviteLink()
+}
+
+async function generateInviteLink() {
+  const { data: { user } } = await sb.auth.getUser()
+  if (!user) return
+
+  // Zoek household van huidige gebruiker
+  const { data: membership } = await sb.from('household_members')
+    .select('household_id').eq('user_id', user.id).single()
+
+  if (!membership) {
+    document.getElementById('invite-content').innerHTML =
+      `<div style="color:var(--red);font-size:13px">Geen household gevonden. Neem contact op met de beheerder.</div>`
+    return
+  }
+
+  // Maak invite aan
+  const { data: invite, error } = await sb.from('invites').insert({
+    household_id: membership.household_id,
+    created_by: user.id
+  }).select('token').single()
+
+  if (error || !invite) {
+    document.getElementById('invite-content').innerHTML =
+      `<div style="color:var(--red);font-size:13px">Kon geen link aanmaken. Probeer opnieuw.</div>`
+    return
+  }
+
+  const link = `${window.location.origin}${window.location.pathname}?invite=${invite.token}`
+  const whatsappMsg = encodeURIComponent(`Hé, ik gebruik een app om abonnementen bij te houden. Klik op de link om mee te kijken:\n${link}`)
+
+  document.getElementById('invite-content').innerHTML = `
+    <div style="font-size:11px;color:var(--muted);margin-bottom:6px;text-align:left">Uitnodigingslink (eenmalig geldig):</div>
+    <div class="invite-link-box">${link}</div>
+    <button class="invite-copy-btn" onclick="copyInviteLink('${link}', this)">📋 Kopieer link</button>
+    <button class="invite-whatsapp-btn" onclick="window.open('https://wa.me/?text=${whatsappMsg}','_blank')">💬 Delen via WhatsApp</button>`
+}
+
+function copyInviteLink(link, btn) {
+  navigator.clipboard.writeText(link).then(() => {
+    btn.textContent = '✓ Gekopieerd!'
+    setTimeout(() => { btn.textContent = '📋 Kopieer link' }, 2000)
+  })
+}
+
+async function handleInviteToken(token) {
+  const { data: { user } } = await sb.auth.getUser()
+  if (!user) return // Niet ingelogd, auth flow handelt redirect af
+
+  // Zoek de invite op
+  const { data: invite } = await sb.from('invites')
+    .select('*').eq('token', token).single()
+
+  if (!invite) {
+    alert('Deze uitnodigingslink is ongeldig of verlopen.')
+    return
+  }
+  if (invite.used_at) {
+    alert('Deze uitnodigingslink is al gebruikt.')
+    return
+  }
+
+  // Controleer of gebruiker al in een household zit
+  const { data: existing } = await sb.from('household_members')
+    .select('household_id').eq('user_id', user.id).single()
+
+  if (existing) {
+    alert('Je bent al gekoppeld aan een huishouden.')
+    return
+  }
+
+  // Voeg gebruiker toe aan household
+  await sb.from('household_members').insert({
+    household_id: invite.household_id,
+    user_id: user.id
+  })
+
+  // Markeer invite als gebruikt
+  await sb.from('invites').update({
+    used_at: new Date().toISOString(),
+    used_by: user.id
+  }).eq('token', token)
+
+  // Verwijder token uit URL
+  window.history.replaceState({}, '', window.location.pathname)
+  alert('✓ Gekoppeld! Je ziet nu de gedeelde abonnementen.')
+  fetchSubs()
+}
+
 // ── INIT ──
 window.addEventListener('load', async () => {
   const { data: { session } } = await sb.auth.getSession()
@@ -1210,6 +1312,9 @@ window.addEventListener('load', async () => {
   if (session) {
     document.getElementById('app-screen').style.display = 'block'
     fetchSubs()
+    // Check invite token na inloggen
+    const token = new URLSearchParams(window.location.search).get('invite')
+    if (token) handleInviteToken(token)
   } else {
     document.getElementById('login-screen').style.display = 'flex'
   }
@@ -1220,6 +1325,9 @@ sb.auth.onAuthStateChange((event, session) => {
     document.getElementById('login-screen').style.display = 'none'
     document.getElementById('app-screen').style.display = 'block'
     fetchSubs()
+    // Check invite token na magic link redirect
+    const token = new URLSearchParams(window.location.search).get('invite')
+    if (token) handleInviteToken(token)
   }
 })
 
