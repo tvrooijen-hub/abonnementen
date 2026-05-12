@@ -1022,33 +1022,50 @@ function buildPrognoseMatrix(months = 24) {
 function buildPrognoseEvents() {
   const now = new Date()
   const events = []
-  const activeSubs = subs.filter(s => s.status === 'actief')
 
-  // Geplande prijsverhogingen
-  activeSubs.forEach(s => {
+  // Geplande prijsverhogingen vanuit price_history
+  subs.filter(s => s.status === 'actief').forEach(s => {
     const future = (s.price_history || [])
       .filter(ph => ph.valid_from && new Date(ph.valid_from) > now)
       .sort((a, b) => a.valid_from.localeCompare(b.valid_from))
+
     future.forEach(ph => {
       const d = new Date(ph.valid_from)
-      const months = Math.round((d - now) / (1000 * 60 * 60 * 24 * 30))
-      const oldMonthly = effectiveMonthlyEUR(s)
+      const currentMonthly = effectiveMonthlyEUR(s)
       const newMonthly = toMonthly(ph.price, s.cycle)
-      const diff = newMonthly - oldMonthly
-      events.push({ type: 'prijs', date: d, months, name: s.name, diff, note: ph.note, icon: diff > 0 ? '📈' : '📉' })
+      const diffMonthly = newMonthly - currentMonthly
+      const diffActual = ph.price - s.price // verschil in originele cyclus bedrag
+      events.push({
+        type: 'prijs',
+        date: d,
+        name: s.name,
+        diff: diffMonthly,
+        diffActual,
+        cycle: s.cycle,
+        newPrice: ph.price,
+        oldPrice: s.price,
+        note: ph.note,
+        icon: diffMonthly > 0 ? '📈' : '📉'
+      })
     })
   })
 
-  // Verlopen abonnementen komende 24 mnd (opgezegde)
+  // Opgezegde abonnementen die eindigen komende 24 mnd
   subs.filter(s => s.status === 'opgezegd' && s.renew_date).forEach(s => {
     const d = new Date(s.renew_date)
     const months = Math.round((d - now) / (1000 * 60 * 60 * 24 * 30))
     if (months >= 0 && months < 24) {
-      events.push({ type: 'opgezegd', date: d, months, name: s.name, diff: -effectiveMonthlyEUR(s), icon: '✓' })
+      events.push({
+        type: 'opgezegd',
+        date: d,
+        name: s.name,
+        diff: -effectiveMonthlyEUR(s),
+        icon: '✓'
+      })
     }
   })
 
-  return events.sort((a, b) => a.date - b.date).slice(0, 8)
+  return events.sort((a, b) => a.date - b.date).slice(0, 10)
 }
 
 function renderPrognosePanel(activeSubs) {
@@ -1181,16 +1198,27 @@ function renderPrognoseEvents() {
   }
 
   el.innerHTML = events.map(ev => {
-    const dateStr = ev.date.toLocaleDateString('nl-NL', { month: 'long', year: 'numeric' })
+    const dateStr = ev.date.toLocaleDateString('nl-NL', { day: 'numeric', month: 'long', year: 'numeric' })
     let badge = ''
-    if (ev.type === 'prijs') badge = `<span class="prog-event-badge" style="color:${ev.diff > 0 ? 'var(--red)' : 'var(--green)'}">${ev.diff > 0 ? '+' : ''}${fmt(ev.diff)}/mnd</span>`
-    if (ev.type === 'opgezegd') badge = `<span class="prog-event-badge" style="color:var(--green)">${fmt(Math.abs(ev.diff))}/mnd bespaard</span>`
+    let sub = ''
+
+    if (ev.type === 'prijs') {
+      const dir = ev.diff > 0 ? 'Verhoging' : 'Verlaging'
+      const color = ev.diff > 0 ? 'var(--red)' : 'var(--green)'
+      badge = `<span class="prog-event-badge" style="color:${color}">${ev.diff > 0 ? '+' : ''}${fmt(ev.diff)}/mnd</span>`
+      sub = `${dateStr} · ${dir}: ${fmt(ev.oldPrice)} → ${fmt(ev.newPrice)}/${ev.cycle}${ev.note ? ' · ' + esc(ev.note) : ''}`
+    }
+    if (ev.type === 'opgezegd') {
+      badge = `<span class="prog-event-badge" style="color:var(--green)">−${fmt(Math.abs(ev.diff))}/mnd</span>`
+      sub = `${dateStr} · Loopt af · besparing`
+    }
+
     return `
       <div class="prog-event">
         <div class="prog-event-icon">${ev.icon}</div>
         <div class="prog-event-body">
           <div class="prog-event-title">${esc(ev.name)}</div>
-          <div class="prog-event-sub">${dateStr}${ev.note ? ' · ' + esc(ev.note) : ''}</div>
+          <div class="prog-event-sub">${sub}</div>
         </div>
         ${badge}
       </div>`
