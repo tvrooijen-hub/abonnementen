@@ -623,6 +623,10 @@ function renderDetail(s) {
           </select>
         </div>
         <div class="field-group full">
+          <div class="field-label">Notities</div>
+          <textarea class="field-input" rows="2" placeholder="Bijv. accountnaam, contractnummer, wachtwoord hint…" style="resize:vertical;font-family:inherit" onblur="saveField('${s.id}','notitie',this.value)">${esc(s.notitie||'')}</textarea>
+        </div>
+        <div class="field-group full">
           <div class="field-label">Status</div>
           <div class="status-trio">
             <button class="status-btn${s.status==='actief'?' green':''}" onclick="saveField('${s.id}','status','actief')">✓ Actief</button>
@@ -632,21 +636,6 @@ function renderDetail(s) {
           ${s.predecessor_id ? `<div style="font-size:11px;color:#7C3AED;margin-top:5px">↩ Opvolger van ${esc(subs.find(x=>x.id===s.predecessor_id)?.name||'')}</div>` : ''}
           ${s.status==='opgezegd' ? `<div style="font-size:11px;color:var(--muted);margin-top:5px">Opgezegd${s.renew_date ? ' · eindigt ' + s.renew_date : ''} · telt niet mee in totalen</div>` : ''}
         </div>
-      </div>
-
-      <div class="accordion-section">
-        <button class="accordion-trigger" onclick="toggleAccordion('k-${s.id}')">
-          <span>📋 Notities</span>
-          <span>
-            <span class="accordion-badge${(s.notitie||'').trim().length>0?' filled':''}">
-              ${(s.notitie||'').trim().length>0 ? 'gevuld' : 'leeg'}
-            </span>
-            <span class="accordion-chevron${kOpen?' open':''}">▶</span>
-          </span>
-        </button>
-        ${kOpen ? `<div class="accordion-body">
-          <textarea class="field-input" rows="3" placeholder="Bijv. accountnaam, contractnummer, wachtwoord hint…" style="resize:vertical;font-family:inherit" onblur="saveField('${s.id}','notitie',this.value)">${esc(s.notitie||'')}</textarea>
-        </div>` : ''}
       </div>
 
       <div class="accordion-section">
@@ -689,14 +678,16 @@ function renderDetail(s) {
 function renderOverzicht(totalMonthly) {
   const activeSubs = subs.filter(s => s.status === 'actief')
 
-  // Categorie data
+  // Categorie data — gesorteerd hoog naar laag
   const catRows = []
   for (const c of CAT_NAMES) {
     const cs = activeSubs.filter(s => s.cat === c)
     if (!cs.length) continue
     const ct = cs.reduce((t, s) => t + effectiveMonthlyEUR(s), 0)
-    catRows.push({ cat: c, total: ct, count: cs.length, subs: cs })
+    const sortedSubs = [...cs].sort((a, b) => effectiveMonthlyEUR(b) - effectiveMonthlyEUR(a))
+    catRows.push({ cat: c, total: ct, count: cs.length, subs: sortedSubs })
   }
+  catRows.sort((a, b) => b.total - a.total)
 
   // Betaalrekening data
   const byPayment = {}
@@ -709,6 +700,12 @@ function renderOverzicht(totalMonthly) {
     <div class="totals">
       <div class="total-card"><div class="lbl">Per maand</div><div class="val">${fmt(totalMonthly)}</div></div>
       <div class="total-card"><div class="lbl">Per jaar</div><div class="val">${fmt(totalMonthly * 12)}</div></div>
+    </div>
+
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;margin-bottom:12px">
+      <div class="prognose-title" style="margin-bottom:6px">Verwachte afschrijvingen · 12 maanden</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Werkelijk gefactureerd bedrag per abonnement op basis van cyclus en verlengdatum</div>
+      <div style="position:relative;height:180px"><canvas id="cashflow-canvas"></canvas></div>
     </div>
 
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;margin-bottom:12px">
@@ -766,7 +763,114 @@ function renderOverzicht(totalMonthly) {
   document.getElementById('panel-content').innerHTML = html
 
   requestAnimationFrame(() => {
-    // Donut chart
+    // ── CASHFLOW GRAFIEK ──
+    // Per maand: welke abonnementen worden gefactureerd, en voor welk bedrag?
+    const cashCanvas = document.getElementById('cashflow-canvas')
+    if (cashCanvas) {
+      const now = new Date()
+      const cfLabels = []
+      const cfData = []
+      const cfTooltipItems = [] // per maand: lijst van {name, amount}
+
+      for (let i = 0; i < 12; i++) {
+        const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
+        cfLabels.push(d.toLocaleDateString('nl-NL', { month: 'short', year: '2-digit' }))
+
+        let monthTotal = 0
+        const items = []
+
+        for (const s of activeSubs) {
+          if (!s.renew_date) continue
+          const renew = new Date(s.renew_date)
+          // Cyclus in maanden
+          const cycleMonths = s.cycle === 'jaar' ? 12 : s.cycle === 'kwartaal' ? 3 : 1
+
+          // Bepaal of een verlenging in deze kalendermaand valt
+          // Verlenging valt in maand i als: renew valt in die maand,
+          // of een later verlengmoment (renew + n*cycle) valt in die maand
+          let hit = false
+          // Loop terwijl verlenging ≤ einde van window
+          let check = new Date(renew)
+          // Ga terug naar eerste verlenging die niet ver in het verleden ligt
+          while (check < new Date(now.getFullYear(), now.getMonth(), 1)) {
+            check = new Date(check.getFullYear(), check.getMonth() + cycleMonths, check.getDate())
+          }
+          // Check alle verlengingen in het 12-maands venster
+          while (check <= new Date(now.getFullYear(), now.getMonth() + 12, 0)) {
+            if (check.getFullYear() === d.getFullYear() && check.getMonth() === d.getMonth()) {
+              hit = true
+              break
+            }
+            check = new Date(check.getFullYear(), check.getMonth() + cycleMonths, check.getDate())
+          }
+
+          if (hit) {
+            // Gebruik de effectieve prijs op die datum (incl. price_history)
+            const effectivePrice = effectiveMonthlyEUR(s, d) * cycleMonths
+            monthTotal += effectivePrice
+            items.push({ name: s.name, amount: effectivePrice })
+          }
+        }
+
+        // Maandelijkse abonnementen zonder verlengdatum ook meenemen
+        for (const s of activeSubs) {
+          if (s.renew_date || s.cycle !== 'maand') continue
+          const monthly = effectiveMonthlyEUR(s, d)
+          monthTotal += monthly
+          items.push({ name: s.name, amount: monthly })
+        }
+
+        cfData.push(parseFloat(monthTotal.toFixed(2)))
+        cfTooltipItems.push(items.sort((a,b) => b.amount - a.amount))
+      }
+
+      new Chart(cashCanvas, {
+        type: 'bar',
+        data: {
+          labels: cfLabels,
+          datasets: [{
+            label: 'Afschrijvingen',
+            data: cfData,
+            backgroundColor: cfData.map(v => v > 0 ? 'rgba(37,99,235,0.15)' : 'transparent'),
+            borderColor: cfData.map(v => v > 0 ? '#2563EB' : 'transparent'),
+            borderWidth: 1.5,
+            borderRadius: 4,
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#ffffff',
+              borderColor: '#E0E0E6',
+              borderWidth: 1,
+              titleColor: '#1A1A2E',
+              bodyColor: '#6B6B80',
+              callbacks: {
+                label: () => null,
+                afterBody: (items) => {
+                  const idx = items[0]?.dataIndex
+                  if (idx === undefined) return []
+                  const list = cfTooltipItems[idx]
+                  if (!list.length) return ['Geen afschrijvingen']
+                  return list.map(it => `${it.name}: ${fmt(it.amount)}`)
+                },
+                footer: (items) => {
+                  const total = cfData[items[0]?.dataIndex]
+                  return total > 0 ? `Totaal: ${fmt(total)}` : ''
+                }
+              }
+            }
+          },
+          scales: {
+            x: { grid: { color: '#E0E0E6' }, ticks: { color: '#6B6B80', font: { size: 10 } } },
+            y: { grid: { color: '#E0E0E6' }, ticks: { color: '#6B6B80', font: { size: 10 }, callback: v => '€' + v.toFixed(0) }, beginAtZero: true }
+          }
+        }
+      })
+    }
     const donutCanvas = document.getElementById('donut-canvas')
     if (donutCanvas) {
       new Chart(donutCanvas, {
