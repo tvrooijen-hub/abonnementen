@@ -1159,7 +1159,7 @@ function buildPrognoseEvents() {
   subs.filter(s => s.status === 'opgezegd' && s.renew_date).forEach(s => {
     const d = new Date(s.renew_date)
     const months = Math.round((d - now) / (1000 * 60 * 60 * 24 * 30))
-    if (months >= 0 && months < 36) events.push({ type: 'opgezegd', date: d, name: s.name, diff: -effectiveMonthlyEUR(s), icon: '✓' })
+    if (months >= 0 && months < 36) events.push({ type: 'opgezegd', date: d, name: s.name, diff: -effectiveMonthlyEUR(s), cycle: s.cycle, icon: '✓' })
   })
   return events.sort((a, b) => a.date - b.date).slice(0, 10)
 }
@@ -1180,9 +1180,8 @@ function renderPrognosePanel(activeSubs) {
 
     <div class="prog-chart-wrap">
       <div class="prog-chart-title">
-        <span>Cashflow · 12 maanden</span>
+        <span>Cashflow</span>
       </div>
-      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Gefactureerd bedrag per maand op basis van cyclus en verlengdatum · hover voor details</div>
       <div class="prog-chart-canvas"><canvas id="prog-cashflow-canvas"></canvas></div>
     </div>
 
@@ -1200,7 +1199,7 @@ function renderPrognosePanel(activeSubs) {
 
     <div class="prog-chart-wrap">
       <div class="prog-chart-title">
-        <span>36 maanden · per kwartaal (maandprijs)</span>
+        <span>36 maanden forecast</span>
       </div>
       <div class="prog-chart-canvas"><canvas id="prog-canvas-36"></canvas></div>
       <div class="prog-legend" id="prog-legend-36"></div>
@@ -1353,11 +1352,18 @@ function renderPrognoseEvents() {
     if (ev.type === 'prijs') {
       const dir = ev.diff > 0 ? 'Verhoging' : 'Verlaging'
       const color = ev.diff > 0 ? 'var(--red)' : 'var(--green)'
-      badge = `<span class="prog-event-badge" style="color:${color}">${ev.diff > 0 ? '+' : ''}${fmt(ev.diff)}/mnd</span>`
+      // Toon verschil in de eenheid van de cyclus
+      const cycleMonths = ev.cycle === 'jaar' ? 12 : ev.cycle === 'kwartaal' ? 3 : 1
+      const diffDisplay = ev.diff * cycleMonths
+      const cycleLabel = ev.cycle === 'jaar' ? '/jr' : ev.cycle === 'kwartaal' ? '/kwt' : '/mnd'
+      badge = `<span class="prog-event-badge" style="color:${color}">${diffDisplay > 0 ? '+' : ''}${fmt(diffDisplay)}${cycleLabel}</span>`
       sub = `${dateStr} · ${dir}: ${fmt(ev.oldPrice)} → ${fmt(ev.newPrice)}/${ev.cycle}${ev.note ? ' · ' + esc(ev.note) : ''}`
     }
     if (ev.type === 'opgezegd') {
-      badge = `<span class="prog-event-badge" style="color:var(--green)">−${fmt(Math.abs(ev.diff))}/mnd</span>`
+      const cycleMonths = ev.cycle === 'jaar' ? 12 : ev.cycle === 'kwartaal' ? 3 : 1
+      const diffDisplay = Math.abs(ev.diff) * (cycleMonths || 1)
+      const cycleLabel = (ev.cycle === 'jaar') ? '/jr' : (ev.cycle === 'kwartaal') ? '/kwt' : '/mnd'
+      badge = `<span class="prog-event-badge" style="color:var(--green)">−${fmt(diffDisplay)}${cycleLabel}</span>`
       sub = `${dateStr} · Loopt af · besparing`
     }
     return `
@@ -1379,20 +1385,18 @@ function renderProgCashflow() {
   const now = new Date()
   const activeSubs = subs.filter(s => s.status === 'actief')
   const cfLabels = []
-  // Per maand: twee waarden + tooltip-lijsten
-  const monthlyData = []    // vaste maandkosten (donkerblauw)
-  const nonMonthlyData = [] // kwartaal/jaar afschrijvingen (lichtblauw)
-  const monthlyTooltip = [] // [{name, amount}, …] voor maandelijkse
-  const nonMonthlyTooltip = [] // [{name, amount, cycle}, …] voor niet-maandelijkse
+  const kwartaalData = []
+  const jaarData = []
+  const kwartaalTooltip = []
+  const jaarTooltip = []
 
   for (let i = 0; i < 12; i++) {
     const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
     cfLabels.push(d.toLocaleDateString('nl-NL', { month: 'short', year: '2-digit' }))
 
-    let mTotal = 0, nmTotal = 0
-    const mItems = [], nmItems = []
+    let kwTotal = 0, jrTotal = 0
+    const kwItems = [], jrItems = []
 
-    // Niet-maandelijkse abonnementen met verlengdatum
     for (const s of activeSubs) {
       if (!s.renew_date || s.cycle === 'maand') continue
       const cycleMonths = s.cycle === 'jaar' ? 12 : 3
@@ -1404,54 +1408,46 @@ function renderProgCashflow() {
       while (check <= new Date(now.getFullYear(), now.getMonth() + 12, 0)) {
         if (check.getFullYear() === d.getFullYear() && check.getMonth() === d.getMonth()) {
           const amount = parseFloat((effectiveMonthlyEUR(s, d) * cycleMonths).toFixed(2))
-          nmTotal += amount
-          nmItems.push({ name: s.name, amount, cycle: s.cycle })
+          if (s.cycle === 'jaar') {
+            jrTotal += amount
+            jrItems.push({ name: s.name, amount })
+          } else {
+            kwTotal += amount
+            kwItems.push({ name: s.name, amount })
+          }
           break
         }
         check = new Date(check.getFullYear(), check.getMonth() + cycleMonths, check.getDate())
       }
     }
 
-    // Maandelijkse abonnementen (met én zonder verlengdatum)
-    for (const s of activeSubs) {
-      if (s.cycle !== 'maand') continue
-      const amount = parseFloat(effectiveMonthlyEUR(s, d).toFixed(2))
-      mTotal += amount
-      mItems.push({ name: s.name, amount })
-    }
-
-    monthlyData.push(parseFloat(mTotal.toFixed(2)))
-    nonMonthlyData.push(parseFloat(nmTotal.toFixed(2)))
-    monthlyTooltip.push(mItems.sort((a, b) => b.amount - a.amount))
-    nonMonthlyTooltip.push(nmItems.sort((a, b) => b.amount - a.amount))
+    kwartaalData.push(parseFloat(kwTotal.toFixed(2)))
+    jaarData.push(parseFloat(jrTotal.toFixed(2)))
+    kwartaalTooltip.push(kwItems.sort((a, b) => b.amount - a.amount))
+    jaarTooltip.push(jrItems.sort((a, b) => b.amount - a.amount))
   }
 
-  // Per-segment hover: we track which dataset was hovered
-  let hoveredDatasetIndex = null
-
-  const chart = new Chart(canvas, {
+  new Chart(canvas, {
     type: 'bar',
     data: {
       labels: cfLabels,
       datasets: [
         {
-          label: 'Maandelijks',
-          data: monthlyData,
-          backgroundColor: 'rgba(37,99,235,0.75)',
+          label: 'Kwartaal',
+          data: kwartaalData,
+          backgroundColor: 'rgba(37,99,235,0.45)',
           borderColor: '#2563EB',
-          borderWidth: 0,
-          borderRadius: { topLeft: 0, topRight: 0, bottomLeft: 4, bottomRight: 4 },
-          borderSkipped: false,
+          borderWidth: 1,
+          borderRadius: 3,
           stack: 'cf',
         },
         {
-          label: 'Kwartaal / Jaar',
-          data: nonMonthlyData,
-          backgroundColor: 'rgba(37,99,235,0.22)',
-          borderColor: '#2563EB',
+          label: 'Jaar',
+          data: jaarData,
+          backgroundColor: 'rgba(99,38,235,0.35)',
+          borderColor: '#6226EB',
           borderWidth: 1,
-          borderRadius: { topLeft: 4, topRight: 4, bottomLeft: 0, bottomRight: 0 },
-          borderSkipped: false,
+          borderRadius: 3,
           stack: 'cf',
         }
       ]
@@ -1477,27 +1473,23 @@ function renderProgCashflow() {
               const idx = tooltipItems[0]?.dataIndex
               if (idx === undefined) return []
               const lines = []
-
-              // Maandelijkse sectie
-              const mList = monthlyTooltip[idx]
-              if (mList.length) {
-                lines.push('── Maandelijks ──')
-                mList.forEach(it => lines.push(`  ${it.name}  ${fmt(it.amount)}`))
+              const kwList = kwartaalTooltip[idx]
+              const jrList = jaarTooltip[idx]
+              if (kwList.length) {
+                lines.push('Kwartaal')
+                kwList.forEach(it => lines.push(`  ${it.name}   ${fmt(it.amount)}`))
               }
-
-              // Niet-maandelijkse sectie
-              const nmList = nonMonthlyTooltip[idx]
-              if (nmList.length) {
+              if (jrList.length) {
                 if (lines.length) lines.push('')
-                lines.push('── Kwartaal / Jaar ──')
-                nmList.forEach(it => lines.push(`  ${it.name}  ${fmt(it.amount)}  (${it.cycle})`))
+                lines.push('Jaar')
+                jrList.forEach(it => lines.push(`  ${it.name}   ${fmt(it.amount)}`))
               }
-
+              if (!lines.length) return ['Geen kwartaal/jaar afschrijvingen']
               return lines
             },
             footer: (tooltipItems) => {
               const idx = tooltipItems[0]?.dataIndex
-              const total = (monthlyData[idx] || 0) + (nonMonthlyData[idx] || 0)
+              const total = (kwartaalData[idx] || 0) + (jaarData[idx] || 0)
               return total > 0 ? `Totaal: ${fmt(total)}` : ''
             }
           }
@@ -1512,23 +1504,20 @@ function renderProgCashflow() {
 
   // Legenda
   const wrap = canvas.closest('.prog-chart-wrap')
-  if (wrap) {
-    const existing = wrap.querySelector('.cf-legend')
-    if (!existing) {
-      const leg = document.createElement('div')
-      leg.className = 'prog-legend cf-legend'
-      leg.style.marginTop = '10px'
-      leg.innerHTML = `
-        <div class="prog-legend-item">
-          <div class="prog-legend-dot" style="background:rgba(37,99,235,0.75)"></div>
-          Maandelijks
-        </div>
-        <div class="prog-legend-item">
-          <div class="prog-legend-dot" style="background:rgba(37,99,235,0.22);border:1px solid #2563EB"></div>
-          Kwartaal / Jaar
-        </div>`
-      wrap.appendChild(leg)
-    }
+  if (wrap && !wrap.querySelector('.cf-legend')) {
+    const leg = document.createElement('div')
+    leg.className = 'prog-legend cf-legend'
+    leg.style.marginTop = '10px'
+    leg.innerHTML = `
+      <div class="prog-legend-item">
+        <div class="prog-legend-dot" style="background:rgba(37,99,235,0.45);border:1px solid #2563EB"></div>
+        Kwartaal
+      </div>
+      <div class="prog-legend-item">
+        <div class="prog-legend-dot" style="background:rgba(99,38,235,0.35);border:1px solid #6226EB"></div>
+        Jaar
+      </div>`
+    wrap.appendChild(leg)
   }
 }
 
