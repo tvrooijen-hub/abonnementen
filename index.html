@@ -639,38 +639,40 @@ function renderDetail(s) {
       </div>
 
       <div class="accordion-section">
-        <button class="accordion-trigger" onclick="toggleAccordion('p-${s.id}')">
-          <span>📈 Prijswijzigingen</span>
-          <span>
-            <span class="accordion-badge${ph.length>0?' filled':''}">${ph.length||'geen'}</span>
-            <span class="accordion-chevron${pOpen?' open':''}">▶</span>
-          </span>
-        </button>
-        ${pOpen ? `<div class="accordion-body">
-          <div class="prijshist-current">Nu: <strong>€ ${parseFloat(s.price).toFixed(2).replace('.',',')} / ${s.cycle}</strong></div>
-          <div style="display:grid;grid-template-columns:110px 90px 1fr auto;gap:4px;margin-bottom:4px;padding:0 2px">
-            <span style="font-size:10px;color:var(--muted)">Ingangsdatum</span>
-            <span style="font-size:10px;color:var(--muted)">Nieuw bedrag (€)</span>
-            <span style="font-size:10px;color:var(--muted)">Notitie</span>
-            <span></span>
-          </div>
-          ${ph.map((p2, pi) => {
-            const newMonthly = toMonthly(parseFloat(p2.price)||0, s.cycle)
-            const oldMonthly = toMonthly(parseFloat(s.price)||0, s.cycle)
-            const pctChange = oldMonthly ? ((newMonthly - oldMonthly) / oldMonthly * 100) : 0
-            const pctLabel = pctChange > 0 ? `<span style="color:var(--red);font-size:10px">+${pctChange.toFixed(0)}%</span>` : pctChange < 0 ? `<span style="color:var(--green);font-size:10px">${pctChange.toFixed(0)}%</span>` : ''
-            return `
-            <div class="prijshist-row" style="align-items:center">
-              <input class="prijshist-input" type="date" value="${p2.valid_from||''}" onblur="savePH('${s.id}',${pi},'valid_from',this.value)">
-              <div style="display:flex;flex-direction:column;gap:2px">
-                <input class="prijshist-input" type="number" value="${p2.price}" step="0.01" onblur="savePH('${s.id}',${pi},'price',parseFloat(this.value)||0)">
-                ${pctLabel}
-              </div>
-              <input class="prijshist-note" value="${esc(p2.note||'')}" placeholder="bijv. jaarlijkse indexatie" onblur="savePH('${s.id}',${pi},'note',this.value)">
-              <button class="prijshist-del" onclick="delPH('${s.id}',${pi})">✕</button>
-            </div>`}).join('')}
-          <button class="prijshist-add" onclick="addPH('${s.id}')">+ Geplande wijziging</button>
-        </div>` : ''}
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <span style="font-size:12px;font-weight:600;color:var(--text)">📈 Prijswijzigingen</span>
+          <span style="font-size:11px;color:var(--muted)">Nu: <strong style="color:var(--text)">€ ${parseFloat(s.price).toFixed(2).replace('.',',')} / ${s.cycle}</strong></span>
+        </div>
+        ${ph.length ? `
+          <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px">
+            ${ph.map((p2, pi) => {
+              const newMonthly = toMonthly(parseFloat(p2.price)||0, s.cycle)
+              const oldMonthly = toMonthly(parseFloat(s.price)||0, s.cycle)
+              const pctChange = oldMonthly ? ((newMonthly - oldMonthly) / oldMonthly * 100) : 0
+              const pctLabel = pctChange > 0
+                ? `<span style="color:var(--red);font-size:10px;font-weight:600">+${pctChange.toFixed(0)}%</span>`
+                : pctChange < 0 ? `<span style="color:var(--green);font-size:10px;font-weight:600">${pctChange.toFixed(0)}%</span>` : ''
+              return `
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:6px;align-items:start">
+                <div>
+                  <div style="font-size:10px;color:var(--muted);margin-bottom:3px">Ingangsdatum</div>
+                  <input class="field-input" type="date" value="${p2.valid_from||''}" style="font-size:12px;padding:6px 8px" onblur="savePH('${s.id}',${pi},'valid_from',this.value)">
+                </div>
+                <div>
+                  <div style="font-size:10px;color:var(--muted);margin-bottom:3px">Nieuw bedrag (€)</div>
+                  <input class="field-input" type="number" value="${p2.price}" step="0.01" style="font-size:12px;padding:6px 8px" onblur="savePH('${s.id}',${pi},'price',parseFloat(this.value)||0)">
+                  ${pctLabel ? `<div style="margin-top:2px">${pctLabel}</div>` : ''}
+                </div>
+                <div>
+                  <div style="font-size:10px;color:var(--muted);margin-bottom:3px">Notitie</div>
+                  <input class="field-input" value="${esc(p2.note||'')}" placeholder="bijv. indexatie" style="font-size:12px;padding:6px 8px" onblur="savePH('${s.id}',${pi},'note',this.value)">
+                </div>
+                <div style="padding-top:18px">
+                  <button class="prijshist-del" onclick="delPH('${s.id}',${pi})">✕</button>
+                </div>
+              </div>`}).join('')}
+          </div>` : `<div style="font-size:12px;color:var(--muted);margin-bottom:8px">Nog geen geplande wijzigingen.</div>`}
+        <button class="prijshist-add" onclick="addPH('${s.id}')">+ Geplande wijziging</button>
       </div>
     </div>`
 }
@@ -1178,6 +1180,14 @@ function renderPrognosePanel(activeSubs) {
 
     <div class="prog-chart-wrap">
       <div class="prog-chart-title">
+        <span>Cashflow · 12 maanden</span>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Gefactureerd bedrag per maand op basis van cyclus en verlengdatum · hover voor details</div>
+      <div class="prog-chart-canvas"><canvas id="prog-cashflow-canvas"></canvas></div>
+    </div>
+
+    <div class="prog-chart-wrap">
+      <div class="prog-chart-title">
         <span>12 maanden · per maand</span>
         <div class="prog-view-toggle">
           <button class="prog-view-btn${prognoseViewMode==='lijn'?' active':''}" onclick="setPrognoseView('lijn')">Lijn</button>
@@ -1198,14 +1208,6 @@ function renderPrognosePanel(activeSubs) {
 
     <div class="prog-section-lbl">Geplande events</div>
     <div class="prog-events" id="prog-events-list"></div>
-
-    <div class="prog-chart-wrap" style="margin-top:16px">
-      <div class="prog-chart-title">
-        <span>Cashflow · 12 maanden</span>
-      </div>
-      <div style="font-size:11px;color:var(--muted);margin-bottom:10px">Werkelijk gefactureerd bedrag op basis van cyclus en verlengdatum · hover voor details</div>
-      <div class="prog-chart-canvas"><canvas id="prog-cashflow-canvas"></canvas></div>
-    </div>
   `
 
   document.getElementById('panel-content').innerHTML = html
@@ -1377,71 +1379,87 @@ function renderProgCashflow() {
   const now = new Date()
   const activeSubs = subs.filter(s => s.status === 'actief')
   const cfLabels = []
-  const cfData = []
-  const cfTooltipItems = [] // per maand: alleen niet-maandelijkse posten hoog→laag
+  // Per maand: twee waarden + tooltip-lijsten
+  const monthlyData = []    // vaste maandkosten (donkerblauw)
+  const nonMonthlyData = [] // kwartaal/jaar afschrijvingen (lichtblauw)
+  const monthlyTooltip = [] // [{name, amount}, …] voor maandelijkse
+  const nonMonthlyTooltip = [] // [{name, amount, cycle}, …] voor niet-maandelijkse
 
   for (let i = 0; i < 12; i++) {
     const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
     cfLabels.push(d.toLocaleDateString('nl-NL', { month: 'short', year: '2-digit' }))
 
-    let monthTotal = 0
-    const nonMonthlyItems = []
+    let mTotal = 0, nmTotal = 0
+    const mItems = [], nmItems = []
 
+    // Niet-maandelijkse abonnementen met verlengdatum
     for (const s of activeSubs) {
-      if (!s.renew_date) continue
-      const cycleMonths = s.cycle === 'jaar' ? 12 : s.cycle === 'kwartaal' ? 3 : 1
+      if (!s.renew_date || s.cycle === 'maand') continue
+      const cycleMonths = s.cycle === 'jaar' ? 12 : 3
       const renew = new Date(s.renew_date)
-
-      // Doorrol naar eerste toekomstige verlenging
       let check = new Date(renew)
       while (check < new Date(now.getFullYear(), now.getMonth(), 1)) {
         check = new Date(check.getFullYear(), check.getMonth() + cycleMonths, check.getDate())
       }
-      // Zoek verlenging in dit venster
-      let hit = false
       while (check <= new Date(now.getFullYear(), now.getMonth() + 12, 0)) {
         if (check.getFullYear() === d.getFullYear() && check.getMonth() === d.getMonth()) {
-          hit = true; break
+          const amount = parseFloat((effectiveMonthlyEUR(s, d) * cycleMonths).toFixed(2))
+          nmTotal += amount
+          nmItems.push({ name: s.name, amount, cycle: s.cycle })
+          break
         }
         check = new Date(check.getFullYear(), check.getMonth() + cycleMonths, check.getDate())
       }
-
-      if (hit) {
-        const amount = effectiveMonthlyEUR(s, d) * cycleMonths
-        monthTotal += amount
-        // Alleen niet-maandelijks in tooltip voor overzicht
-        if (s.cycle !== 'maand') {
-          nonMonthlyItems.push({ name: s.name, amount, cycle: s.cycle })
-        }
-      }
     }
 
-    // Maandelijkse zonder verlengdatum ook in totaal (maar niet in tooltip)
+    // Maandelijkse abonnementen (met én zonder verlengdatum)
     for (const s of activeSubs) {
-      if (s.renew_date || s.cycle !== 'maand') continue
-      monthTotal += effectiveMonthlyEUR(s, d)
+      if (s.cycle !== 'maand') continue
+      const amount = parseFloat(effectiveMonthlyEUR(s, d).toFixed(2))
+      mTotal += amount
+      mItems.push({ name: s.name, amount })
     }
 
-    cfData.push(parseFloat(monthTotal.toFixed(2)))
-    cfTooltipItems.push(nonMonthlyItems.sort((a, b) => b.amount - a.amount))
+    monthlyData.push(parseFloat(mTotal.toFixed(2)))
+    nonMonthlyData.push(parseFloat(nmTotal.toFixed(2)))
+    monthlyTooltip.push(mItems.sort((a, b) => b.amount - a.amount))
+    nonMonthlyTooltip.push(nmItems.sort((a, b) => b.amount - a.amount))
   }
 
-  new Chart(canvas, {
+  // Per-segment hover: we track which dataset was hovered
+  let hoveredDatasetIndex = null
+
+  const chart = new Chart(canvas, {
     type: 'bar',
     data: {
       labels: cfLabels,
-      datasets: [{
-        label: 'Cashflow',
-        data: cfData,
-        backgroundColor: cfData.map(v => v > 0 ? 'rgba(37,99,235,0.12)' : 'transparent'),
-        borderColor: cfData.map(v => v > 0 ? '#2563EB' : 'transparent'),
-        borderWidth: 1.5,
-        borderRadius: 4,
-      }]
+      datasets: [
+        {
+          label: 'Maandelijks',
+          data: monthlyData,
+          backgroundColor: 'rgba(37,99,235,0.75)',
+          borderColor: '#2563EB',
+          borderWidth: 0,
+          borderRadius: { topLeft: 0, topRight: 0, bottomLeft: 4, bottomRight: 4 },
+          borderSkipped: false,
+          stack: 'cf',
+        },
+        {
+          label: 'Kwartaal / Jaar',
+          data: nonMonthlyData,
+          backgroundColor: 'rgba(37,99,235,0.22)',
+          borderColor: '#2563EB',
+          borderWidth: 1,
+          borderRadius: { topLeft: 4, topRight: 4, bottomLeft: 0, bottomRight: 0 },
+          borderSkipped: false,
+          stack: 'cf',
+        }
+      ]
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
         tooltip: {
@@ -1454,27 +1472,64 @@ function renderProgCashflow() {
           footerFont: { weight: '600' },
           padding: 10,
           callbacks: {
-            label: () => '',
-            afterLabel: () => '',
-            beforeBody: (items) => {
-              const idx = items[0]?.dataIndex
-              const list = cfTooltipItems[idx] || []
-              if (!list.length) return ['(alleen maandelijkse abonnementen)']
-              return list.map(it => `${it.name}  ${fmt(it.amount)}`)
+            label: () => null,
+            afterBody: (tooltipItems) => {
+              const idx = tooltipItems[0]?.dataIndex
+              if (idx === undefined) return []
+              const lines = []
+
+              // Maandelijkse sectie
+              const mList = monthlyTooltip[idx]
+              if (mList.length) {
+                lines.push('── Maandelijks ──')
+                mList.forEach(it => lines.push(`  ${it.name}  ${fmt(it.amount)}`))
+              }
+
+              // Niet-maandelijkse sectie
+              const nmList = nonMonthlyTooltip[idx]
+              if (nmList.length) {
+                if (lines.length) lines.push('')
+                lines.push('── Kwartaal / Jaar ──')
+                nmList.forEach(it => lines.push(`  ${it.name}  ${fmt(it.amount)}  (${it.cycle})`))
+              }
+
+              return lines
             },
-            footer: (items) => {
-              const total = cfData[items[0]?.dataIndex]
+            footer: (tooltipItems) => {
+              const idx = tooltipItems[0]?.dataIndex
+              const total = (monthlyData[idx] || 0) + (nonMonthlyData[idx] || 0)
               return total > 0 ? `Totaal: ${fmt(total)}` : ''
             }
           }
         }
       },
       scales: {
-        x: { grid: { color: '#E0E0E6' }, ticks: { color: '#6B6B80', font: { size: 10 } } },
-        y: { grid: { color: '#E0E0E6' }, ticks: { color: '#6B6B80', font: { size: 10 }, callback: v => '€' + v.toFixed(0) }, beginAtZero: true }
+        x: { stacked: true, grid: { color: '#E0E0E6' }, ticks: { color: '#6B6B80', font: { size: 10 } } },
+        y: { stacked: true, grid: { color: '#E0E0E6' }, ticks: { color: '#6B6B80', font: { size: 10 }, callback: v => '€' + v.toFixed(0) }, beginAtZero: true }
       }
     }
   })
+
+  // Legenda
+  const wrap = canvas.closest('.prog-chart-wrap')
+  if (wrap) {
+    const existing = wrap.querySelector('.cf-legend')
+    if (!existing) {
+      const leg = document.createElement('div')
+      leg.className = 'prog-legend cf-legend'
+      leg.style.marginTop = '10px'
+      leg.innerHTML = `
+        <div class="prog-legend-item">
+          <div class="prog-legend-dot" style="background:rgba(37,99,235,0.75)"></div>
+          Maandelijks
+        </div>
+        <div class="prog-legend-item">
+          <div class="prog-legend-dot" style="background:rgba(37,99,235,0.22);border:1px solid #2563EB"></div>
+          Kwartaal / Jaar
+        </div>`
+      wrap.appendChild(leg)
+    }
+  }
 }
 
 function setPrognoseView(mode) {
