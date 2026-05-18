@@ -1093,10 +1093,26 @@ let prognoseViewMode = 'lijn' // 'lijn' | 'gestapeld'
 let prognoseChart12 = null
 let prognoseChart36 = null
 
+// Geeft alle abonnementen die op `d` nog kosten maken:
+// - status actief
+// - status opgezegd maar renew_date ligt op of na het begin van maand d
+function subsActiveAt(d) {
+  const monthStart = new Date(d.getFullYear(), d.getMonth(), 1)
+  return subs.filter(s => {
+    if (s.status === 'actief') return true
+    if (s.status === 'opgezegd' && s.renew_date) {
+      const end = new Date(s.renew_date)
+      return end >= monthStart
+    }
+    return false
+  })
+}
+
 function buildPrognoseMatrix(months) {
   const now = new Date()
-  const activeSubs = subs.filter(s => s.status === 'actief')
-  const usedCats = [...new Set(activeSubs.map(s => s.cat || 'Overig'))].filter(Boolean)
+  // Voor categorieën: gebruik huidige actieve abonnementen als basis
+  const baseSubs = subs.filter(s => s.status === 'actief')
+  const usedCats = [...new Set(baseSubs.map(s => s.cat || 'Overig'))].filter(Boolean)
   const labels = []
   const catData = {}
   usedCats.forEach(c => { catData[c] = [] })
@@ -1104,8 +1120,9 @@ function buildPrognoseMatrix(months) {
   for (let i = 0; i < months; i++) {
     const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
     labels.push(d.toLocaleDateString('nl-NL', { month: 'short', year: '2-digit' }))
+    const activeThen = subsActiveAt(d)
     usedCats.forEach(c => {
-      const total = activeSubs.filter(s => s.cat === c).reduce((t, s) => t + effectiveMonthlyEUR(s, d), 0)
+      const total = activeThen.filter(s => s.cat === c).reduce((t, s) => t + effectiveMonthlyEUR(s, d), 0)
       catData[c].push(parseFloat(total.toFixed(2)))
     })
   }
@@ -1113,10 +1130,9 @@ function buildPrognoseMatrix(months) {
 }
 
 function buildQuarterlyMatrix() {
-  // 36 maanden → 12 kwartalen; label = kwartaal, waarde = maandgemiddelde
   const now = new Date()
-  const activeSubs = subs.filter(s => s.status === 'actief')
-  const usedCats = [...new Set(activeSubs.map(s => s.cat || 'Overig'))].filter(Boolean)
+  const baseSubs = subs.filter(s => s.status === 'actief')
+  const usedCats = [...new Set(baseSubs.map(s => s.cat || 'Overig'))].filter(Boolean)
   const labels = []
   const catData = {}
   usedCats.forEach(c => { catData[c] = [] })
@@ -1126,12 +1142,11 @@ function buildQuarterlyMatrix() {
     const d = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1)
     const qNum = Math.floor(d.getMonth() / 3) + 1
     labels.push(`Q${qNum} '${String(d.getFullYear()).slice(2)}`)
-    // Gemiddelde van de 3 maanden in het kwartaal
     usedCats.forEach(c => {
       let sum = 0
       for (let m = 0; m < 3; m++) {
         const md = new Date(now.getFullYear(), now.getMonth() + monthOffset + m, 1)
-        sum += activeSubs.filter(s => s.cat === c).reduce((t, s) => t + effectiveMonthlyEUR(s, md), 0)
+        sum += subsActiveAt(md).filter(s => s.cat === c).reduce((t, s) => t + effectiveMonthlyEUR(s, md), 0)
       }
       catData[c].push(parseFloat((sum / 3).toFixed(2)))
     })
@@ -1166,9 +1181,9 @@ function buildPrognoseEvents() {
 
 function renderPrognosePanel(activeSubs) {
   const now = new Date()
-  const currentMonthly = activeSubs.reduce((t, s) => t + effectiveMonthlyEUR(s), 0)
+  const currentMonthly = subsActiveAt(now).reduce((t, s) => t + effectiveMonthlyEUR(s, now), 0)
   const month12 = new Date(now.getFullYear(), now.getMonth() + 12, 1)
-  const monthly12 = activeSubs.reduce((t, s) => t + effectiveMonthlyEUR(s, month12), 0)
+  const monthly12 = subsActiveAt(month12).reduce((t, s) => t + effectiveMonthlyEUR(s, month12), 0)
   const delta12 = monthly12 - currentMonthly
 
   const html = `
@@ -1383,8 +1398,8 @@ function renderProgCashflow() {
   if (!canvas) return
 
   const now = new Date()
-  const activeSubs = subs.filter(s => s.status === 'actief')
   const cfLabels = []
+  const monthlyData = []
   const kwartaalData = []
   const jaarData = []
   const kwartaalTooltip = []
@@ -1394,11 +1409,16 @@ function renderProgCashflow() {
     const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
     cfLabels.push(d.toLocaleDateString('nl-NL', { month: 'short', year: '2-digit' }))
 
-    let kwTotal = 0, jrTotal = 0
+    const subsNow = subsActiveAt(d)
+    let mTotal = 0, kwTotal = 0, jrTotal = 0
     const kwItems = [], jrItems = []
 
-    for (const s of activeSubs) {
-      if (!s.renew_date || s.cycle === 'maand') continue
+    for (const s of subsNow) {
+      if (s.cycle === 'maand') {
+        mTotal += parseFloat(effectiveMonthlyEUR(s, d).toFixed(2))
+        continue
+      }
+      if (!s.renew_date) continue
       const cycleMonths = s.cycle === 'jaar' ? 12 : 3
       const renew = new Date(s.renew_date)
       let check = new Date(renew)
@@ -1408,19 +1428,15 @@ function renderProgCashflow() {
       while (check <= new Date(now.getFullYear(), now.getMonth() + 12, 0)) {
         if (check.getFullYear() === d.getFullYear() && check.getMonth() === d.getMonth()) {
           const amount = parseFloat((effectiveMonthlyEUR(s, d) * cycleMonths).toFixed(2))
-          if (s.cycle === 'jaar') {
-            jrTotal += amount
-            jrItems.push({ name: s.name, amount })
-          } else {
-            kwTotal += amount
-            kwItems.push({ name: s.name, amount })
-          }
+          if (s.cycle === 'jaar') { jrTotal += amount; jrItems.push({ name: s.name, amount }) }
+          else { kwTotal += amount; kwItems.push({ name: s.name, amount }) }
           break
         }
         check = new Date(check.getFullYear(), check.getMonth() + cycleMonths, check.getDate())
       }
     }
 
+    monthlyData.push(parseFloat(mTotal.toFixed(2)))
     kwartaalData.push(parseFloat(kwTotal.toFixed(2)))
     jaarData.push(parseFloat(jrTotal.toFixed(2)))
     kwartaalTooltip.push(kwItems.sort((a, b) => b.amount - a.amount))
@@ -1433,21 +1449,30 @@ function renderProgCashflow() {
       labels: cfLabels,
       datasets: [
         {
+          label: 'Maandelijks',
+          data: monthlyData,
+          backgroundColor: 'rgba(37,99,235,0.18)',
+          borderColor: 'rgba(37,99,235,0.35)',
+          borderWidth: 1,
+          borderRadius: 2,
+          stack: 'cf',
+        },
+        {
           label: 'Kwartaal',
           data: kwartaalData,
-          backgroundColor: 'rgba(37,99,235,0.45)',
+          backgroundColor: 'rgba(37,99,235,0.6)',
           borderColor: '#2563EB',
           borderWidth: 1,
-          borderRadius: 3,
+          borderRadius: 2,
           stack: 'cf',
         },
         {
           label: 'Jaar',
           data: jaarData,
-          backgroundColor: 'rgba(99,38,235,0.35)',
+          backgroundColor: 'rgba(99,38,235,0.5)',
           borderColor: '#6226EB',
           borderWidth: 1,
-          borderRadius: 3,
+          borderRadius: 2,
           stack: 'cf',
         }
       ]
@@ -1467,6 +1492,8 @@ function renderProgCashflow() {
           footerColor: '#1A1A2E',
           footerFont: { weight: '600' },
           padding: 10,
+          // Maandlaag (index 0) niet tonen in tooltip body, wel in footer totaal
+          filter: (item) => item.datasetIndex !== 0,
           callbacks: {
             label: () => null,
             afterBody: (tooltipItems) => {
@@ -1489,8 +1516,8 @@ function renderProgCashflow() {
             },
             footer: (tooltipItems) => {
               const idx = tooltipItems[0]?.dataIndex
-              const total = (kwartaalData[idx] || 0) + (jaarData[idx] || 0)
-              return total > 0 ? `Totaal: ${fmt(total)}` : ''
+              const total = (monthlyData[idx] || 0) + (kwartaalData[idx] || 0) + (jaarData[idx] || 0)
+              return total > 0 ? `Totaal incl. maand: ${fmt(total)}` : ''
             }
           }
         }
@@ -1502,7 +1529,6 @@ function renderProgCashflow() {
     }
   })
 
-  // Legenda
   const wrap = canvas.closest('.prog-chart-wrap')
   if (wrap && !wrap.querySelector('.cf-legend')) {
     const leg = document.createElement('div')
@@ -1510,11 +1536,15 @@ function renderProgCashflow() {
     leg.style.marginTop = '10px'
     leg.innerHTML = `
       <div class="prog-legend-item">
-        <div class="prog-legend-dot" style="background:rgba(37,99,235,0.45);border:1px solid #2563EB"></div>
+        <div class="prog-legend-dot" style="background:rgba(37,99,235,0.18);border:1px solid rgba(37,99,235,0.35)"></div>
+        Maandelijks
+      </div>
+      <div class="prog-legend-item">
+        <div class="prog-legend-dot" style="background:rgba(37,99,235,0.6);border:1px solid #2563EB"></div>
         Kwartaal
       </div>
       <div class="prog-legend-item">
-        <div class="prog-legend-dot" style="background:rgba(99,38,235,0.35);border:1px solid #6226EB"></div>
+        <div class="prog-legend-dot" style="background:rgba(99,38,235,0.5);border:1px solid #6226EB"></div>
         Jaar
       </div>`
     wrap.appendChild(leg)
