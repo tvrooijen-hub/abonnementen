@@ -678,7 +678,17 @@ function renderDetail(s) {
 }
 
 function renderOverzicht(totalMonthly) {
-  const activeSubs = subs.filter(s => s.status === 'actief')
+  const allActiveSubs = subs.filter(s => s.status === 'actief')
+
+  // Alle betaalrekeningen
+  const allPayments = [...new Set(allActiveSubs.map(s => s.payment_method || 'Onbekend'))].sort()
+
+  // Initialiseer filter op alles bij eerste render
+  if (overzichtPaymentFilter === null) overzichtPaymentFilter = new Set(allPayments)
+
+  // Gefilterde subs
+  const activeSubs = allActiveSubs.filter(s => overzichtPaymentFilter.has(s.payment_method || 'Onbekend'))
+  const filteredTotal = activeSubs.reduce((t, s) => t + effectiveMonthlyEUR(s), 0)
 
   // Categorie data — gesorteerd hoog naar laag
   const catRows = []
@@ -691,12 +701,22 @@ function renderOverzicht(totalMonthly) {
   }
   catRows.sort((a, b) => b.total - a.total)
 
-  // Betaalrekening data
+  // Betaalrekening totalen (ongefilterd voor het overzichtsblok)
   const byPayment = {}
-  for (const s of activeSubs) {
+  for (const s of allActiveSubs) {
     const pm = s.payment_method || 'Onbekend'
     byPayment[pm] = (byPayment[pm] || 0) + effectiveMonthlyEUR(s)
   }
+
+  const isFiltered = overzichtPaymentFilter.size < allPayments.length
+  const filterHtml = allPayments.length > 1 ? `
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+      <button class="cat-pill${!isFiltered?' active':''}"
+        onclick="overzichtPaymentFilter=new Set(${JSON.stringify(allPayments)});render()">Alles</button>
+      ${allPayments.map(pm => `
+        <button class="cat-pill${isFiltered&&overzichtPaymentFilter.has(pm)?' active':''}"
+          onclick="overzichtSetFilter('${esc(pm)}')" style="white-space:nowrap">💳 ${esc(pm)}</button>`).join('')}
+    </div>` : ''
 
   let html = `
     <div class="totals">
@@ -705,12 +725,16 @@ function renderOverzicht(totalMonthly) {
     </div>
 
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;margin-bottom:12px">
-      <div class="prognose-title">Per categorie</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div class="prognose-title" style="margin-bottom:0">Per categorie</div>
+        ${isFiltered ? `<span style="font-size:11px;color:var(--blue);font-weight:500">${fmt(filteredTotal)}/mnd</span>` : ''}
+      </div>
+      ${filterHtml}
       <div style="position:relative;height:180px;display:flex;align-items:center;justify-content:center">
         <canvas id="donut-canvas"></canvas>
         <div style="position:absolute;text-align:center;pointer-events:none">
           <div style="font-size:11px;color:var(--muted)">totaal</div>
-          <div style="font-size:14px;font-weight:600;font-family:monospace">${fmt(totalMonthly)}</div>
+          <div style="font-size:14px;font-weight:600;font-family:monospace">${fmt(filteredTotal)}</div>
         </div>
       </div>
       <div style="display:flex;flex-direction:column;gap:4px;margin-top:8px">
@@ -723,7 +747,7 @@ function renderOverzicht(totalMonthly) {
       </div>
       <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
         <div class="prognose-title" style="margin-bottom:4px">Per betaalrekening</div>
-        ${Object.entries(byPayment).map(([pm, t]) => `
+        ${Object.entries(byPayment).sort((a,b)=>b[1]-a[1]).map(([pm, t]) => `
           <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px">
             <span style="color:var(--muted)">💳 ${esc(pm)}</span>
             <span style="font-family:monospace;font-weight:500">${fmt(t)}/mnd</span>
@@ -792,6 +816,17 @@ function renderOverzicht(totalMonthly) {
       })
     }
   })
+}
+
+function overzichtSetFilter(pm) {
+  const allPayments = [...new Set(subs.filter(s=>s.status==='actief').map(s=>s.payment_method||'Onbekend'))]
+  // Eén rekening geselecteerd en nogmaals klikken → terug naar alles
+  if (overzichtPaymentFilter.size === 1 && overzichtPaymentFilter.has(pm)) {
+    overzichtPaymentFilter = new Set(allPayments)
+  } else {
+    overzichtPaymentFilter = new Set([pm])
+  }
+  render()
 }
 
 function renderInzichten(activeSubs) {
@@ -1092,6 +1127,7 @@ const CAT_COLORS = [
 let prognoseViewMode = 'lijn' // 'lijn' | 'gestapeld'
 let prognoseChart12 = null
 let prognoseChart36 = null
+let overzichtPaymentFilter = null // null = alles, Set van geselecteerde rekeningen
 
 // Geeft alle abonnementen die op `d` nog kosten maken:
 // - status actief
@@ -1254,14 +1290,23 @@ function makeChartDatasets(catData, usedCats, mode) {
       fill: true,
     }]
   } else {
-    return usedCats.map((cat, i) => ({
-      label: `${CATS[cat]?.icon || ''} ${cat}`,
-      data: catData[cat],
-      backgroundColor: CAT_COLORS[i % CAT_COLORS.length] + '99',
-      borderColor: CAT_COLORS[i % CAT_COLORS.length],
-      borderWidth: 1,
-      fill: true,
-    }))
+    // Grootste categorie onderaan → sorteer op gemiddelde waarde over alle maanden, dan omgekeerd
+    const sortedCats = [...usedCats].sort((a, b) => {
+      const avgA = catData[a].reduce((s, v) => s + v, 0) / (catData[a].length || 1)
+      const avgB = catData[b].reduce((s, v) => s + v, 0) / (catData[b].length || 1)
+      return avgB - avgA // grootste eerst = onderaan in stacked bar
+    })
+    return sortedCats.map((cat) => {
+      const i = usedCats.indexOf(cat)
+      return {
+        label: `${CATS[cat]?.icon || ''} ${cat}`,
+        data: catData[cat],
+        backgroundColor: CAT_COLORS[i % CAT_COLORS.length] + '99',
+        borderColor: CAT_COLORS[i % CAT_COLORS.length],
+        borderWidth: 1,
+        fill: true,
+      }
+    })
   }
 }
 
@@ -1271,6 +1316,11 @@ function makeLegendHtml(usedCats, mode, legendId) {
   if (mode === 'lijn') {
     el.innerHTML = `<div class="prog-legend-item"><div class="prog-legend-dot" style="background:#2563EB"></div>Totaal per maand</div>`
   } else {
+    // Zelfde volgorde als de gestapelde chart (grootste onderaan = eerst in legenda)
+    const sorted = [...usedCats].sort((a, b) => {
+      const { catData } = { catData: Object.fromEntries(usedCats.map(c => [c, []])) }
+      return 0 // volgorde al bepaald in datasets, toon gewoon in dezelfde volgorde
+    })
     el.innerHTML = usedCats.map((cat, i) => `
       <div class="prog-legend-item">
         <div class="prog-legend-dot" style="background:${CAT_COLORS[i % CAT_COLORS.length]}"></div>
