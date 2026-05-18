@@ -202,7 +202,6 @@
     <div class="nav-tabs">
       <button class="tab active" onclick="setPanel('beheer')">Abonnementen</button>
       <button class="tab" onclick="setPanel('overzicht')">Overzicht</button>
-      <button class="tab" onclick="setPanel('inzichten')">Inzichten</button>
       <button class="tab" onclick="setPanel('prognose')">Prognose</button>
       <button class="tab" onclick="openInviteModal()">Delen</button>
       <button class="logout-btn" onclick="handleLogout()">Uitloggen</button>
@@ -514,7 +513,7 @@ function renderPrognoseChart() {
 // ── RENDER ──
 function setPanel(p) {
   currentPanel = p
-  document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', ['beheer','overzicht','inzichten','prognose','delen'][i] === p))
+  document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', ['beheer','overzicht','prognose','delen'][i] === p))
   render()
 }
 
@@ -523,8 +522,7 @@ function render() {
   const totalMonthly = activeSubs.reduce((t, s) => t + effectiveMonthlyEUR(s), 0)
   if (currentPanel === 'beheer') renderBeheer(totalMonthly, activeSubs)
   else if (currentPanel === 'overzicht') renderOverzicht(totalMonthly)
-  else if (currentPanel === 'prognose') renderPrognosePanel(activeSubs)
-  else renderInzichten(activeSubs)
+  else renderPrognosePanel(activeSubs)
 }
 
 function renderBeheer(totalMonthly, activeSubs) {
@@ -1100,13 +1098,13 @@ const CAT_COLORS = [
 ]
 
 let prognoseViewMode = 'lijn' // 'lijn' | 'gestapeld'
-let prognoseMainChart = null
+let prognoseChart12 = null
+let prognoseChart36 = null
 
-function buildPrognoseMatrix(months = 24) {
+function buildPrognoseMatrix(months) {
   const now = new Date()
   const activeSubs = subs.filter(s => s.status === 'actief')
   const usedCats = [...new Set(activeSubs.map(s => s.cat || 'Overig'))].filter(Boolean)
-
   const labels = []
   const catData = {}
   usedCats.forEach(c => { catData[c] = [] })
@@ -1115,10 +1113,35 @@ function buildPrognoseMatrix(months = 24) {
     const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
     labels.push(d.toLocaleDateString('nl-NL', { month: 'short', year: '2-digit' }))
     usedCats.forEach(c => {
-      const total = activeSubs
-        .filter(s => s.cat === c)
-        .reduce((t, s) => t + effectiveMonthlyEUR(s, d), 0)
+      const total = activeSubs.filter(s => s.cat === c).reduce((t, s) => t + effectiveMonthlyEUR(s, d), 0)
       catData[c].push(parseFloat(total.toFixed(2)))
+    })
+  }
+  return { labels, catData, usedCats }
+}
+
+function buildQuarterlyMatrix() {
+  // 36 maanden → 12 kwartalen; label = kwartaal, waarde = maandgemiddelde
+  const now = new Date()
+  const activeSubs = subs.filter(s => s.status === 'actief')
+  const usedCats = [...new Set(activeSubs.map(s => s.cat || 'Overig'))].filter(Boolean)
+  const labels = []
+  const catData = {}
+  usedCats.forEach(c => { catData[c] = [] })
+
+  for (let q = 0; q < 12; q++) {
+    const monthOffset = q * 3
+    const d = new Date(now.getFullYear(), now.getMonth() + monthOffset, 1)
+    const qNum = Math.floor(d.getMonth() / 3) + 1
+    labels.push(`Q${qNum} '${String(d.getFullYear()).slice(2)}`)
+    // Gemiddelde van de 3 maanden in het kwartaal
+    usedCats.forEach(c => {
+      let sum = 0
+      for (let m = 0; m < 3; m++) {
+        const md = new Date(now.getFullYear(), now.getMonth() + monthOffset + m, 1)
+        sum += activeSubs.filter(s => s.cat === c).reduce((t, s) => t + effectiveMonthlyEUR(s, md), 0)
+      }
+      catData[c].push(parseFloat((sum / 3).toFixed(2)))
     })
   }
   return { labels, catData, usedCats }
@@ -1127,52 +1150,25 @@ function buildPrognoseMatrix(months = 24) {
 function buildPrognoseEvents() {
   const now = new Date()
   const events = []
-
-  // Geplande prijsverhogingen vanuit price_history
   subs.filter(s => s.status === 'actief').forEach(s => {
     const future = (s.price_history || [])
       .filter(ph => ph.valid_from && new Date(ph.valid_from) > now)
       .sort((a, b) => a.valid_from.localeCompare(b.valid_from))
-
     future.forEach(ph => {
       const d = new Date(ph.valid_from)
-      // Prijs net vóór deze wijziging (een dag eerder)
       const dayBefore = new Date(d); dayBefore.setDate(dayBefore.getDate() - 1)
       const currentMonthly = effectiveMonthlyEUR(s, dayBefore)
       const newMonthly = toMonthly(parseFloat(ph.price), s.cycle) * (s.price_currency === '$' ? 1 / USD_RATE : 1)
       const diffMonthly = newMonthly - currentMonthly
-      const diffActual = parseFloat(ph.price) - parseFloat(s.price)
       const oldPrice = effectiveMonthlyEUR(s, dayBefore) * (s.cycle === 'jaar' ? 12 : s.cycle === 'kwartaal' ? 3 : 1)
-      events.push({
-        type: 'prijs',
-        date: d,
-        name: s.name,
-        diff: diffMonthly,
-        diffActual,
-        cycle: s.cycle,
-        newPrice: parseFloat(ph.price),
-        oldPrice,
-        note: ph.note,
-        icon: diffMonthly > 0 ? '📈' : '📉'
-      })
+      events.push({ type: 'prijs', date: d, name: s.name, diff: diffMonthly, cycle: s.cycle, newPrice: parseFloat(ph.price), oldPrice, note: ph.note, icon: diffMonthly > 0 ? '📈' : '📉' })
     })
   })
-
-  // Opgezegde abonnementen die eindigen komende 24 mnd
   subs.filter(s => s.status === 'opgezegd' && s.renew_date).forEach(s => {
     const d = new Date(s.renew_date)
     const months = Math.round((d - now) / (1000 * 60 * 60 * 24 * 30))
-    if (months >= 0 && months < 24) {
-      events.push({
-        type: 'opgezegd',
-        date: d,
-        name: s.name,
-        diff: -effectiveMonthlyEUR(s),
-        icon: '✓'
-      })
-    }
+    if (months >= 0 && months < 36) events.push({ type: 'opgezegd', date: d, name: s.name, diff: -effectiveMonthlyEUR(s), icon: '✓' })
   })
-
   return events.sort((a, b) => a.date - b.date).slice(0, 10)
 }
 
@@ -1192,14 +1188,22 @@ function renderPrognosePanel(activeSubs) {
 
     <div class="prog-chart-wrap">
       <div class="prog-chart-title">
-        <span>Maandelijkse kosten · 24 maanden</span>
+        <span>12 maanden · per maand</span>
         <div class="prog-view-toggle">
           <button class="prog-view-btn${prognoseViewMode==='lijn'?' active':''}" onclick="setPrognoseView('lijn')">Lijn</button>
           <button class="prog-view-btn${prognoseViewMode==='gestapeld'?' active':''}" onclick="setPrognoseView('gestapeld')">Gestapeld</button>
         </div>
       </div>
-      <div class="prog-chart-canvas"><canvas id="prog-main-canvas"></canvas></div>
-      <div class="prog-legend" id="prog-legend"></div>
+      <div class="prog-chart-canvas"><canvas id="prog-canvas-12"></canvas></div>
+      <div class="prog-legend" id="prog-legend-12"></div>
+    </div>
+
+    <div class="prog-chart-wrap">
+      <div class="prog-chart-title">
+        <span>36 maanden · per kwartaal (maandprijs)</span>
+      </div>
+      <div class="prog-chart-canvas"><canvas id="prog-canvas-36"></canvas></div>
+      <div class="prog-legend" id="prog-legend-36"></div>
     </div>
 
     <div class="prog-section-lbl">Geplande events</div>
@@ -1208,121 +1212,143 @@ function renderPrognosePanel(activeSubs) {
 
   document.getElementById('panel-content').innerHTML = html
   requestAnimationFrame(() => {
-    renderPrognoseMainChart()
+    renderProgChart12()
+    renderProgChart36()
     renderPrognoseEvents()
   })
 }
 
-function renderPrognoseMainChart() {
-  const { labels, catData, usedCats } = buildPrognoseMatrix(24)
-  const canvas = document.getElementById('prog-main-canvas')
-  if (!canvas) return
-  if (prognoseMainChart) { prognoseMainChart.destroy(); prognoseMainChart = null }
-
-  let datasets = []
-
-  if (prognoseViewMode === 'lijn') {
-    // Alleen totaallijn tonen
-    const totalData = labels.map((_, i) =>
-      parseFloat(usedCats.reduce((t, cat) => t + catData[cat][i], 0).toFixed(2))
+function makeChartDatasets(catData, usedCats, mode) {
+  if (mode === 'lijn') {
+    const labels = Object.values(catData)[0]?.map ? null : null
+    const keys = Object.keys(catData[usedCats[0]] ? catData : {})
+    // totaallijn
+    const len = catData[usedCats[0]]?.length || 0
+    const totalData = Array.from({ length: len }, (_, i) =>
+      parseFloat(usedCats.reduce((t, cat) => t + (catData[cat][i] || 0), 0).toFixed(2))
     )
-    datasets = [{
+    return [{
       label: 'Totaal',
       data: totalData,
       borderColor: '#2563EB',
-      backgroundColor: 'rgba(37,99,235,0.08)',
-      borderWidth: 2.5,
-      pointRadius: 2,
-      pointHoverRadius: 5,
+      backgroundColor: 'rgba(37,99,235,0.07)',
+      borderWidth: 2,
+      pointRadius: 3,
+      pointHoverRadius: 6,
       tension: 0.3,
       fill: true,
     }]
   } else {
-    // Gestapeld per categorie
-    datasets = usedCats.map((cat, i) => {
-      const color = CAT_COLORS[i % CAT_COLORS.length]
-      return {
-        label: `${CATS[cat]?.icon || ''} ${cat}`,
-        data: catData[cat],
-        backgroundColor: color + '99',
-        borderColor: color,
+    return usedCats.map((cat, i) => ({
+      label: `${CATS[cat]?.icon || ''} ${cat}`,
+      data: catData[cat],
+      backgroundColor: CAT_COLORS[i % CAT_COLORS.length] + '99',
+      borderColor: CAT_COLORS[i % CAT_COLORS.length],
+      borderWidth: 1,
+      fill: true,
+    }))
+  }
+}
+
+function makeLegendHtml(usedCats, mode, legendId) {
+  const el = document.getElementById(legendId)
+  if (!el) return
+  if (mode === 'lijn') {
+    el.innerHTML = `<div class="prog-legend-item"><div class="prog-legend-dot" style="background:#2563EB"></div>Totaal per maand</div>`
+  } else {
+    el.innerHTML = usedCats.map((cat, i) => `
+      <div class="prog-legend-item">
+        <div class="prog-legend-dot" style="background:${CAT_COLORS[i % CAT_COLORS.length]}"></div>
+        ${CATS[cat]?.icon || ''} ${cat}
+      </div>`).join('')
+  }
+}
+
+function chartOptions(stacked) {
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        backgroundColor: '#ffffff',
+        borderColor: '#E0E0E6',
         borderWidth: 1,
-        fill: true,
+        titleColor: '#1A1A2E',
+        bodyColor: '#6B6B80',
+        callbacks: {
+          label: ctx => `${ctx.dataset.label}: ${fmt(ctx.parsed.y)}`,
+          footer: stacked ? items => { const t = items.reduce((s,i)=>s+i.parsed.y,0); return `Totaal: ${fmt(t)}` } : undefined
+        }
       }
-    })
+    },
+    scales: {
+      x: { stacked, grid: { color: '#E0E0E6' }, ticks: { color: '#6B6B80', font: { size: 10 }, maxRotation: 45 } },
+      y: { stacked, grid: { color: '#E0E0E6' }, ticks: { color: '#6B6B80', font: { size: 10 }, callback: v => '€' + v.toFixed(0) } }
+    }
   }
+}
 
-  prognoseMainChart = new Chart(canvas, {
-    type: prognoseViewMode === 'gestapeld' ? 'bar' : 'line',
+function renderProgChart12() {
+  const { labels, catData, usedCats } = buildPrognoseMatrix(12)
+  const canvas = document.getElementById('prog-canvas-12')
+  if (!canvas) return
+  if (prognoseChart12) { prognoseChart12.destroy(); prognoseChart12 = null }
+  const stacked = prognoseViewMode === 'gestapeld'
+  const datasets = makeChartDatasets(catData, usedCats, prognoseViewMode)
+  prognoseChart12 = new Chart(canvas, {
+    type: stacked ? 'bar' : 'line',
     data: { labels, datasets },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor: '#ffffff',
-          borderColor: '#E0E0E6',
-          borderWidth: 1,
-          titleColor: '#1A1A2E',
-          bodyColor: '#6B6B80',
-          callbacks: {
-            label: ctx => `${ctx.dataset.label}: ${fmt(ctx.parsed.y)}`,
-            footer: items => {
-              if (prognoseViewMode === 'gestapeld') {
-                const total = items.reduce((t, i) => t + i.parsed.y, 0)
-                return `Totaal: ${fmt(total)}`
-              }
-            }
-          }
-        }
-      },
-      scales: {
-        x: {
-          stacked: prognoseViewMode === 'gestapeld',
-          grid: { color: '#E0E0E6' },
-          ticks: { color: '#6B6B80', font: { size: 10 }, maxRotation: 45 }
-        },
-        y: {
-          stacked: prognoseViewMode === 'gestapeld',
-          grid: { color: '#E0E0E6' },
-          ticks: { color: '#6B6B80', font: { size: 10 }, callback: v => '€ ' + v.toFixed(0) }
-        }
-      }
-    }
+    options: chartOptions(stacked)
   })
+  makeLegendHtml(usedCats, prognoseViewMode, 'prog-legend-12')
+}
 
-  // Custom legend
-  const legend = document.getElementById('prog-legend')
-  if (legend) {
-    if (prognoseViewMode === 'lijn') {
-      legend.innerHTML = `<div class="prog-legend-item"><div class="prog-legend-dot" style="background:#2563EB"></div>Totaal per maand</div>`
-    } else {
-      legend.innerHTML = usedCats.map((cat, i) => `
-        <div class="prog-legend-item">
-          <div class="prog-legend-dot" style="background:${CAT_COLORS[i % CAT_COLORS.length]}"></div>
-          ${CATS[cat]?.icon || ''} ${cat}
-        </div>`).join('')
-    }
-  }
+function renderProgChart36() {
+  const { labels, catData, usedCats } = buildQuarterlyMatrix()
+  const canvas = document.getElementById('prog-canvas-36')
+  if (!canvas) return
+  if (prognoseChart36) { prognoseChart36.destroy(); prognoseChart36 = null }
+  // 36-maands grafiek toont altijd lijn (totaal maandprijs)
+  const len = catData[usedCats[0]]?.length || 0
+  const totalData = Array.from({ length: len }, (_, i) =>
+    parseFloat(usedCats.reduce((t, cat) => t + (catData[cat][i] || 0), 0).toFixed(2))
+  )
+  prognoseChart36 = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Gem. maandprijs',
+        data: totalData,
+        borderColor: '#6B6B80',
+        backgroundColor: 'rgba(107,107,128,0.06)',
+        borderWidth: 2,
+        pointRadius: 4,
+        pointBackgroundColor: '#6B6B80',
+        pointHoverRadius: 7,
+        tension: 0.3,
+        fill: true,
+      }]
+    },
+    options: chartOptions(false)
+  })
+  const el = document.getElementById('prog-legend-36')
+  if (el) el.innerHTML = `<div class="prog-legend-item"><div class="prog-legend-dot" style="background:#6B6B80"></div>Gemiddelde maandprijs per kwartaal</div>`
 }
 
 function renderPrognoseEvents() {
   const events = buildPrognoseEvents()
   const el = document.getElementById('prog-events-list')
   if (!el) return
-
   if (!events.length) {
     el.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:16px 0">Geen geplande events. Voeg prijswijzigingen toe via een abonnement.</div>`
     return
   }
-
   el.innerHTML = events.map(ev => {
     const dateStr = ev.date.toLocaleDateString('nl-NL', { day: 'numeric', month: 'long', year: 'numeric' })
-    let badge = ''
-    let sub = ''
-
+    let badge = '', sub = ''
     if (ev.type === 'prijs') {
       const dir = ev.diff > 0 ? 'Verhoging' : 'Verlaging'
       const color = ev.diff > 0 ? 'var(--red)' : 'var(--green)'
@@ -1333,7 +1359,6 @@ function renderPrognoseEvents() {
       badge = `<span class="prog-event-badge" style="color:var(--green)">−${fmt(Math.abs(ev.diff))}/mnd</span>`
       sub = `${dateStr} · Loopt af · besparing`
     }
-
     return `
       <div class="prog-event">
         <div class="prog-event-icon">${ev.icon}</div>
