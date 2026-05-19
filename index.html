@@ -843,12 +843,15 @@ function renderOverzicht(totalMonthly) {
         </div>
       </div>
       <div style="display:flex;flex-direction:column;gap:4px;margin-top:8px">
-        ${catRows.map((r, i) => `
+        ${catRows.map((r, i) => {
+          const pct = filteredTotal > 0 ? (r.total / filteredTotal * 100).toFixed(1) : 0
+          return `
           <div style="display:flex;align-items:center;gap:6px;font-size:11px">
             <div style="width:8px;height:8px;border-radius:50%;background:${CAT_COLORS[i % CAT_COLORS.length]};flex-shrink:0"></div>
             <span style="flex:1;color:var(--muted)">${CATS[r.cat]?.icon || ''} ${r.cat}</span>
+            <span style="color:var(--muted);margin-right:6px">${pct}%</span>
             <span style="font-family:monospace;font-weight:500">${fmt(r.total)}</span>
-          </div>`).join('')}
+          </div>`}).join('')}
       </div>
     </div>
 
@@ -906,7 +909,11 @@ function renderOverzicht(totalMonthly) {
               borderWidth: 1,
               titleColor: '#1A1A2E',
               bodyColor: '#6B6B80',
-              callbacks: { label: ctx => ` ${fmt(ctx.parsed)}/mnd` }
+              callbacks: { label: ctx => {
+                const total = ctx.dataset.data.reduce((a, b) => a + b, 0)
+                const pct = total > 0 ? (ctx.parsed / total * 100).toFixed(1) : 0
+                return ` ${fmt(ctx.parsed)}/mnd (${pct}%)`
+              }}
             }
           }
         }
@@ -1307,22 +1314,12 @@ function buildPrognoseEvents() {
     })
   })
 
-  // Opgezegde subs — maar als er een opvolger is, toon als overstap
+  // Opgezegde subs = besparing (groen)
   subs.filter(s => s.status === 'opgezegd' && s.renew_date).forEach(s => {
     const d = new Date(s.renew_date)
     const months = Math.round((d - now) / (1000 * 60 * 60 * 24 * 30))
     if (months < 0 || months >= 36) return
-
-    const opvolger = s.successor_id ? subs.find(x => x.id === s.successor_id) : null
-    if (opvolger) {
-      // Overstap: toon netto verschil
-      const oldMonthly = effectiveMonthlyEUR(s)
-      const newMonthly = effectiveMonthlyEUR(opvolger)
-      const diff = newMonthly - oldMonthly
-      events.push({ type: 'overstap', date: d, name: s.name, opvolgerName: opvolger.name, diff, cycle: s.cycle })
-    } else {
-      events.push({ type: 'opgezegd', date: d, name: s.name, diff: -effectiveMonthlyEUR(s), cycle: s.cycle })
-    }
+    events.push({ type: 'opgezegd', date: d, name: s.name, diff: -effectiveMonthlyEUR(s), cycle: s.cycle })
   })
 
   return events.sort((a, b) => a.date - b.date)
@@ -1351,7 +1348,7 @@ function renderPrognosePanel(activeSubs) {
 
     <div class="prog-chart-wrap">
       <div class="prog-chart-title">
-        <span>12 maanden · per maand</span>
+        <span>12 maanden</span>
         <div class="prog-view-toggle">
           <button class="prog-view-btn${prognoseViewMode==='lijn'?' active':''}" onclick="setPrognoseView('lijn')">Lijn</button>
           <button class="prog-view-btn${prognoseViewMode==='gestapeld'?' active':''}" onclick="setPrognoseView('gestapeld')">Gestapeld</button>
@@ -1526,36 +1523,25 @@ function renderPrognoseEvents() {
   }
   el.innerHTML = events.map(ev => {
     const dateStr = ev.date.toLocaleDateString('nl-NL', { day: 'numeric', month: 'long', year: 'numeric' })
-    let badge = '', sub = '', dotColor = 'var(--green)'
+    const cycleMonths = ev.cycle === 'jaar' ? 12 : ev.cycle === 'kwartaal' ? 3 : 1
+    const cycleLabel = ev.cycle === 'jaar' ? '/jr' : ev.cycle === 'kwartaal' ? '/kwt' : '/mnd'
+    const isPositive = ev.diff > 0 // kosten stijgen = rood
+    const dotColor = isPositive ? 'var(--red)' : 'var(--green)'
+    const badgeColor = isPositive ? 'var(--red)' : 'var(--green)'
+
+    let sub = '', badge = ''
 
     if (ev.type === 'prijs') {
-      const dir = ev.diff > 0 ? 'Verhoging' : 'Verlaging'
-      const color = ev.diff > 0 ? 'var(--red)' : 'var(--green)'
-      dotColor = ev.diff > 0 ? 'var(--red)' : 'var(--green)'
-      const cycleMonths = ev.cycle === 'jaar' ? 12 : ev.cycle === 'kwartaal' ? 3 : 1
       const diffDisplay = ev.diff * cycleMonths
-      const cycleLabel = ev.cycle === 'jaar' ? '/jr' : ev.cycle === 'kwartaal' ? '/kwt' : '/mnd'
-      badge = `<span class="prog-event-badge" style="color:${color}">${diffDisplay > 0 ? '+' : ''}${fmt(diffDisplay)}${cycleLabel}</span>`
+      const dir = isPositive ? 'Verhoging' : 'Verlaging'
+      badge = `<span class="prog-event-badge" style="color:${badgeColor}">${isPositive?'+':''}${fmt(diffDisplay)}${cycleLabel}</span>`
       sub = `${dateStr} · ${dir}: ${fmt(ev.oldPrice)} → ${fmt(ev.newPrice)}/${ev.cycle}${ev.note ? ' · ' + esc(ev.note) : ''}`
     }
 
     if (ev.type === 'opgezegd') {
-      dotColor = 'var(--green)'
-      const cycleMonths = ev.cycle === 'jaar' ? 12 : ev.cycle === 'kwartaal' ? 3 : 1
       const diffDisplay = Math.abs(ev.diff) * (cycleMonths || 1)
-      const cycleLabel = ev.cycle === 'jaar' ? '/jr' : ev.cycle === 'kwartaal' ? '/kwt' : '/mnd'
       badge = `<span class="prog-event-badge" style="color:var(--green)">−${fmt(diffDisplay)}${cycleLabel}</span>`
-      sub = `${dateStr} · Loopt af · besparing`
-    }
-
-    if (ev.type === 'overstap') {
-      dotColor = '#D97706' // oranje
-      const color = ev.diff > 0 ? 'var(--red)' : ev.diff < 0 ? 'var(--green)' : 'var(--muted)'
-      const cycleMonths = ev.cycle === 'jaar' ? 12 : ev.cycle === 'kwartaal' ? 3 : 1
-      const diffDisplay = ev.diff * (cycleMonths || 1)
-      const cycleLabel = ev.cycle === 'jaar' ? '/jr' : ev.cycle === 'kwartaal' ? '/kwt' : '/mnd'
-      badge = `<span class="prog-event-badge" style="color:${color}">${ev.diff >= 0 ? '+' : ''}${fmt(diffDisplay)}${cycleLabel}</span>`
-      sub = `${dateStr} · Overstap naar ${esc(ev.opvolgerName)}`
+      sub = `${dateStr} · Loopt af`
     }
 
     return `
