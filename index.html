@@ -350,18 +350,6 @@ const CATS = {
 }
 
 const CAT_NAMES = Object.keys(CATS)
-const CAT_KENMERKEN = {
-  'Mobiel & Internet': ['Data','Bellen','SMS','Netwerk'],
-  'Verzekeringen': ['Dekking','Eigen risico','Type','Looptijd'],
-  'Streaming': ['Schermen','Kwaliteit','Offline'],
-  'Software': ['Gebruikers','Opslag','Platform'],
-  'Cloud & Opslag': ['Opslag','Apparaten'],
-  'Sport & Fitness': ['Type','Locaties'],
-  'Games': ['Platform','Online'],
-  'Nieuws & Kennis': ['Toegang','Archief'],
-  'Wonen': ['Type','Looptijd'],
-  'AI': ['Model','Berichten/mnd'],
-}
 
 const USD_RATE = 1.08
 let subs = []
@@ -369,7 +357,6 @@ let currentPanel = 'beheer'
 let activeCat = CAT_NAMES[0]
 let expandedIds = new Set()
 let openAccordions = new Set()
-let prognoseChart = null
 let beheerSearch = ''
 
 function logoUrl(domain) {
@@ -404,9 +391,7 @@ function daysUntil(dateStr) {
 
 function fmt(n) { return '€\u00a0' + n.toFixed(2).replace('.', ',') }
 
-function defaultKenmerken(cat) {
-  return (CAT_KENMERKEN[cat] || []).map((k, i) => ({ key: k, value: '', sort_order: i }))
-}
+function defaultKenmerken() { return [] }
 
 function esc(str) {
   return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
@@ -424,6 +409,12 @@ async function sendMagicLink() {
 
 async function handleLogout() {
   await sb.auth.signOut()
+  overzichtPaymentFilter = null
+  subs = []
+  expandedIds.clear()
+  openAccordions.clear()
+  beheerSearch = ''
+  currentPanel = 'beheer'
   document.getElementById('app-screen').style.display = 'none'
   document.getElementById('login-screen').style.display = 'flex'
 }
@@ -467,7 +458,7 @@ function sanitizeDates(obj) {
 
 async function persistUpdate(sub, fields) {
   const { kenmerken, price_history, ...rest } = fields
-  if (Object.keys(rest).length) await sb.from('subscriptions').update(sanitizeDates(rest)).eq('id', sub.id)
+  if (Object.keys(rest).length) await sb.from('subscriptions').update(sanitizeDates(rest)).eq('id', sub.id).eq('user_id', sub.user_id)
   if (kenmerken !== undefined) {
     await sb.from('kenmerken').delete().eq('subscription_id', sub.id)
     if (kenmerken.length) await sb.from('kenmerken').insert(
@@ -494,80 +485,10 @@ async function addSub(data) {
 
 async function deleteSub(id) {
   if (!confirm('Abonnement verwijderen?')) return
-  await sb.from('subscriptions').delete().eq('id', id)
+  const { data: { user } } = await sb.auth.getUser()
+  await sb.from('subscriptions').delete().eq('id', id).eq('user_id', user.id)
   expandedIds.delete(id)
   fetchSubs()
-}
-
-// ── PROGNOSE ──
-function buildPrognoseData() {
-  const activeSubs = subs.filter(s => s.status === 'actief')
-  const labels = []
-  const values = []
-  const now = new Date()
-  for (let i = 0; i < 24; i++) {
-    const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
-    const total = activeSubs.reduce((t, s) => t + effectiveMonthlyEUR(s, d), 0)
-    labels.push(d.toLocaleDateString('nl-NL', { month: 'short', year: '2-digit' }))
-    values.push(parseFloat(total.toFixed(2)))
-  }
-  return { labels, values }
-}
-
-function renderPrognoseChart() {
-  const { labels, values } = buildPrognoseData()
-  const canvas = document.getElementById('prognose-canvas')
-  if (!canvas) return
-
-  if (prognoseChart) { prognoseChart.destroy(); prognoseChart = null }
-
-  prognoseChart = new Chart(canvas, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        data: values,
-        borderColor: '#4F8EF7',
-        backgroundColor: 'rgba(79,142,247,0.08)',
-        borderWidth: 2,
-        pointRadius: 3,
-        pointBackgroundColor: '#4F8EF7',
-        fill: true,
-        tension: 0.3,
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label: ctx => fmt(ctx.parsed.y) + '/mnd'
-          },
-          backgroundColor: '#ffffff',
-          borderColor: '#E0E0E6',
-          borderWidth: 1,
-          titleColor: '#1A1A2E',
-          bodyColor: '#6B6B80',
-        }
-      },
-      scales: {
-        x: {
-          grid: { color: '#E0E0E6' },
-          ticks: { color: '#6B6B80', font: { size: 10 }, maxRotation: 45 }
-        },
-        y: {
-          grid: { color: '#E0E0E6' },
-          ticks: {
-            color: '#6B6B80',
-            font: { size: 10 },
-            callback: v => '€ ' + v.toFixed(0)
-          }
-        }
-      }
-    }
-  })
 }
 
 // ── RENDER ──
@@ -756,14 +677,11 @@ async function applyReorder(srcId, targetId) {
   const srcIdx = subs.findIndex(s => s.id === srcId)
   const tgtIdx = subs.findIndex(s => s.id === targetId)
   if (srcIdx === -1 || tgtIdx === -1) return
-  // Move in local array
   const [moved] = subs.splice(srcIdx, 1)
   subs.splice(tgtIdx, 0, moved)
   renderSubList()
-  // Persist sort_order for all subs
-  const { data: { user } } = await sb.auth.getUser()
   await Promise.all(subs.map((s, i) =>
-    sb.from('subscriptions').update({ sort_order: i }).eq('id', s.id)
+    sb.from('subscriptions').update({ sort_order: i }).eq('id', s.id).eq('user_id', s.user_id)
   ))
 }
 
