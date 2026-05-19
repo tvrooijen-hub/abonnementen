@@ -430,11 +430,19 @@ async function handleLogout() {
 
 // ── DATA ──
 async function fetchSubs() {
-  const { data } = await sb.from('subscriptions')
+  const { data, error } = await sb.from('subscriptions')
     .select('*, kenmerken(id, key, value, sort_order), price_history(id, price, valid_from, note)')
-    .order('sort_order', { ascending: true, nullsFirst: false })
     .order('created_at', { ascending: true })
-  subs = data || []
+  if (!error && data) {
+    // Sorteer op sort_order indien aanwezig, anders created_at volgorde behouden
+    subs = data.sort((a, b) => {
+      const ao = a.sort_order ?? 99999
+      const bo = b.sort_order ?? 99999
+      return ao - bo
+    })
+  } else {
+    subs = data || []
+  }
   render()
 }
 
@@ -619,7 +627,6 @@ function renderBeheer(totalMonthly, activeSubs) {
 
   document.getElementById('panel-content').innerHTML = html
   renderSubList()
-  initDragDrop()
 }
 
 function renderSubList() {
