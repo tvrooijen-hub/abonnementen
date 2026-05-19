@@ -819,7 +819,7 @@ function renderOverzicht(totalMonthly) {
       <button class="cat-pill${!isFiltered?' active':''}"
         onclick="overzichtPaymentFilter=new Set(${JSON.stringify(allPayments)});render()">Alles</button>
       ${allPayments.map(pm => `
-        <button class="cat-pill${isFiltered&&overzichtPaymentFilter.has(pm)?' active':''}"
+        <button class="cat-pill${isFiltered&&overzichtPaymentFilter.has(pm)&&overzichtPaymentFilter.size===1?' active':''}"
           onclick="overzichtSetFilter('${esc(pm)}')" style="white-space:nowrap">💳 ${esc(pm)}</button>`).join('')}
     </div>` : ''
 
@@ -1290,6 +1290,8 @@ function buildQuarterlyMatrix() {
 function buildPrognoseEvents() {
   const now = new Date()
   const events = []
+
+  // Actieve subs met toekomstige prijswijzigingen
   subs.filter(s => s.status === 'actief').forEach(s => {
     const future = (s.price_history || [])
       .filter(ph => ph.valid_from && new Date(ph.valid_from) > now)
@@ -1301,15 +1303,29 @@ function buildPrognoseEvents() {
       const newMonthly = toMonthly(parseFloat(ph.price), s.cycle) * (s.price_currency === '$' ? 1 / USD_RATE : 1)
       const diffMonthly = newMonthly - currentMonthly
       const oldPrice = effectiveMonthlyEUR(s, dayBefore) * (s.cycle === 'jaar' ? 12 : s.cycle === 'kwartaal' ? 3 : 1)
-      events.push({ type: 'prijs', date: d, name: s.name, diff: diffMonthly, cycle: s.cycle, newPrice: parseFloat(ph.price), oldPrice, note: ph.note, icon: diffMonthly > 0 ? '📈' : '📉' })
+      events.push({ type: 'prijs', date: d, name: s.name, diff: diffMonthly, cycle: s.cycle, newPrice: parseFloat(ph.price), oldPrice, note: ph.note })
     })
   })
+
+  // Opgezegde subs — maar als er een opvolger is, toon als overstap
   subs.filter(s => s.status === 'opgezegd' && s.renew_date).forEach(s => {
     const d = new Date(s.renew_date)
     const months = Math.round((d - now) / (1000 * 60 * 60 * 24 * 30))
-    if (months >= 0 && months < 36) events.push({ type: 'opgezegd', date: d, name: s.name, diff: -effectiveMonthlyEUR(s), cycle: s.cycle, icon: '✓' })
+    if (months < 0 || months >= 36) return
+
+    const opvolger = s.successor_id ? subs.find(x => x.id === s.successor_id) : null
+    if (opvolger) {
+      // Overstap: toon netto verschil
+      const oldMonthly = effectiveMonthlyEUR(s)
+      const newMonthly = effectiveMonthlyEUR(opvolger)
+      const diff = newMonthly - oldMonthly
+      events.push({ type: 'overstap', date: d, name: s.name, opvolgerName: opvolger.name, diff, cycle: s.cycle })
+    } else {
+      events.push({ type: 'opgezegd', date: d, name: s.name, diff: -effectiveMonthlyEUR(s), cycle: s.cycle })
+    }
   })
-  return events.sort((a, b) => a.date - b.date).slice(0, 10)
+
+  return events.sort((a, b) => a.date - b.date)
 }
 
 function renderPrognosePanel(activeSubs) {
@@ -1510,27 +1526,41 @@ function renderPrognoseEvents() {
   }
   el.innerHTML = events.map(ev => {
     const dateStr = ev.date.toLocaleDateString('nl-NL', { day: 'numeric', month: 'long', year: 'numeric' })
-    let badge = '', sub = ''
+    let badge = '', sub = '', dotColor = 'var(--green)'
+
     if (ev.type === 'prijs') {
       const dir = ev.diff > 0 ? 'Verhoging' : 'Verlaging'
       const color = ev.diff > 0 ? 'var(--red)' : 'var(--green)'
-      // Toon verschil in de eenheid van de cyclus
+      dotColor = ev.diff > 0 ? 'var(--red)' : 'var(--green)'
       const cycleMonths = ev.cycle === 'jaar' ? 12 : ev.cycle === 'kwartaal' ? 3 : 1
       const diffDisplay = ev.diff * cycleMonths
       const cycleLabel = ev.cycle === 'jaar' ? '/jr' : ev.cycle === 'kwartaal' ? '/kwt' : '/mnd'
       badge = `<span class="prog-event-badge" style="color:${color}">${diffDisplay > 0 ? '+' : ''}${fmt(diffDisplay)}${cycleLabel}</span>`
       sub = `${dateStr} · ${dir}: ${fmt(ev.oldPrice)} → ${fmt(ev.newPrice)}/${ev.cycle}${ev.note ? ' · ' + esc(ev.note) : ''}`
     }
+
     if (ev.type === 'opgezegd') {
+      dotColor = 'var(--green)'
       const cycleMonths = ev.cycle === 'jaar' ? 12 : ev.cycle === 'kwartaal' ? 3 : 1
       const diffDisplay = Math.abs(ev.diff) * (cycleMonths || 1)
-      const cycleLabel = (ev.cycle === 'jaar') ? '/jr' : (ev.cycle === 'kwartaal') ? '/kwt' : '/mnd'
+      const cycleLabel = ev.cycle === 'jaar' ? '/jr' : ev.cycle === 'kwartaal' ? '/kwt' : '/mnd'
       badge = `<span class="prog-event-badge" style="color:var(--green)">−${fmt(diffDisplay)}${cycleLabel}</span>`
       sub = `${dateStr} · Loopt af · besparing`
     }
+
+    if (ev.type === 'overstap') {
+      dotColor = '#D97706' // oranje
+      const color = ev.diff > 0 ? 'var(--red)' : ev.diff < 0 ? 'var(--green)' : 'var(--muted)'
+      const cycleMonths = ev.cycle === 'jaar' ? 12 : ev.cycle === 'kwartaal' ? 3 : 1
+      const diffDisplay = ev.diff * (cycleMonths || 1)
+      const cycleLabel = ev.cycle === 'jaar' ? '/jr' : ev.cycle === 'kwartaal' ? '/kwt' : '/mnd'
+      badge = `<span class="prog-event-badge" style="color:${color}">${ev.diff >= 0 ? '+' : ''}${fmt(diffDisplay)}${cycleLabel}</span>`
+      sub = `${dateStr} · Overstap naar ${esc(ev.opvolgerName)}`
+    }
+
     return `
       <div class="prog-event">
-        <div class="prog-event-icon">${ev.icon}</div>
+        <div style="width:10px;height:10px;border-radius:50%;flex-shrink:0;margin-top:4px;background:${dotColor}"></div>
         <div class="prog-event-body">
           <div class="prog-event-title">${esc(ev.name)}</div>
           <div class="prog-event-sub">${sub}</div>
