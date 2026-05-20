@@ -573,8 +573,8 @@ function renderSubList() {
 
     let badge = ''
     if (s.status === 'opgezegd') badge = `<span class="badge badge-cancelled">Opgezegd</span>`
-    else if (days !== null && days <= 7) badge = `<span class="badge badge-soon">over ${days}d</span>`
-    else if (days !== null && days <= 30) badge = `<span class="badge badge-ok">over ${days}d</span>`
+    else if (days !== null && days >= 0 && days <= 7) badge = `<span class="badge badge-soon">over ${days}d</span>`
+    else if (days !== null && days >= 0 && days <= 30) badge = `<span class="badge badge-ok">over ${days}d</span>`
 
     const logoHtml = s.domain
       ? `<img src="${logoUrl(s.domain)}" width="24" height="24" style="border-radius:6px" onerror="this.style.display='none';this.nextSibling.style.display='inline'" alt=""><span style="font-size:18px;display:none">${CATS[s.cat]?.icon||'📌'}</span>`
